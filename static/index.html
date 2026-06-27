@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Validation Council</title>
+<style>
+  :root {
+    --go: #22c55e;
+    --cgo: #84cc16;
+    --pivot: #f59e0b;
+    --kill: #ef4444;
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --border: #334155;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --accent: #6366f1;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 1rem;
+  }
+
+  .container { max-width: 900px; margin: 0 auto; }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: .25rem;
+  }
+  .subtitle { color: var(--muted); font-size: .875rem; margin-bottom: 1.5rem; }
+
+  /* Input */
+  .input-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: .75rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  textarea {
+    width: 100%;
+    min-height: 120px;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-size: 1rem;
+    resize: vertical;
+    outline: none;
+    font-family: inherit;
+  }
+  textarea::placeholder { color: var(--muted); }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: .5rem;
+    padding: .625rem 1.25rem;
+    font-size: .9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+  .btn:hover:not(:disabled) { opacity: .85; }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Timeline */
+  .timeline {
+    display: flex;
+    gap: .5rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+  .stage-chip {
+    flex: 1;
+    min-width: 140px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: .5rem;
+    padding: .75rem 1rem;
+    font-size: .8rem;
+    color: var(--muted);
+    transition: border-color .3s, color .3s;
+  }
+  .stage-chip.active { border-color: var(--accent); color: var(--text); }
+  .stage-chip.done { border-color: var(--go); color: var(--go); }
+  .stage-chip .stage-label { font-weight: 700; margin-bottom: .2rem; }
+
+  /* Verdict stamp */
+  #verdict-stamp {
+    display: none;
+    border-radius: .75rem;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+    border: 2px solid;
+  }
+  #verdict-stamp .verdict-line {
+    font-size: 1.4rem;
+    font-weight: 800;
+    letter-spacing: .04em;
+    margin-bottom: .4rem;
+  }
+  #verdict-stamp .confidence { font-size: .85rem; color: var(--muted); margin-bottom: .75rem; }
+  #verdict-stamp .one-liner { font-size: .95rem; }
+  #verdict-stamp.GO     { background: #052e16; border-color: var(--go);    color: var(--go); }
+  #verdict-stamp.CGO    { background: #1a2e05; border-color: var(--cgo);   color: var(--cgo); }
+  #verdict-stamp.PIVOT  { background: #2d1a05; border-color: var(--pivot); color: var(--pivot); }
+  #verdict-stamp.KILL   { background: #2d0505; border-color: var(--kill);  color: var(--kill); }
+  #verdict-stamp .verdict-body { color: var(--text); font-size: .875rem; margin-top: .75rem; white-space: pre-wrap; }
+
+  /* Rankings table */
+  #rankings-section { display: none; margin-bottom: 1.5rem; }
+  .section-title { font-size: .8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: .5rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  th, td { padding: .5rem .75rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  .rank-badge {
+    display: inline-block;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: .7rem;
+    font-weight: 700;
+    text-align: center;
+    line-height: 1.5rem;
+  }
+  .rank-badge.rank-1 { background: #f59e0b; }
+  .rank-badge.rank-2 { background: var(--muted); }
+  .rank-badge.rank-3 { background: #92400e; }
+
+  /* Analysis cards */
+  #analyses-section { display: none; margin-bottom: 1.5rem; }
+  .tabs { display: flex; gap: .25rem; flex-wrap: wrap; margin-bottom: .75rem; }
+  .tab {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: .375rem;
+    padding: .375rem .75rem;
+    font-size: .8rem;
+    cursor: pointer;
+    color: var(--muted);
+    transition: border-color .15s, color .15s;
+  }
+  .tab:hover { border-color: var(--accent); color: var(--text); }
+  .tab.active { border-color: var(--accent); color: var(--text); background: #1e1b4b; }
+  .tab.error { border-color: var(--kill); color: var(--kill); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: .75rem;
+    padding: 1rem 1.25rem;
+    display: none;
+  }
+  .card.active { display: block; }
+  .card pre, .card .analysis-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    font-size: .875rem;
+    line-height: 1.6;
+  }
+  .spinner {
+    display: inline-block;
+    width: .9rem;
+    height: .9rem;
+    border: 2px solid var(--muted);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-msg {
+    background: #2d0505;
+    border: 1px solid var(--kill);
+    border-radius: .5rem;
+    padding: .75rem 1rem;
+    color: var(--kill);
+    font-size: .875rem;
+    margin-bottom: 1rem;
+    display: none;
+  }
+
+  .loading-dot::after {
+    content: '';
+    animation: dots 1.2s steps(4, end) infinite;
+  }
+  @keyframes dots {
+    0%, 100% { content: ''; }
+    25% { content: '.'; }
+    50% { content: '..'; }
+    75% { content: '...'; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>⚖️ Validation Council</h1>
+  <p class="subtitle">Multiple LLMs validate your business idea — anonymously, anti-sycophantically. Real validation = people paying or refusing; the council decides <em>what to test first</em>.</p>
+
+  <div class="input-box">
+    <textarea id="idea-input" placeholder="Describe your business idea in 2–10 sentences. The more specific, the sharper the verdict." aria-label="Business idea"></textarea>
+    <div style="display:flex; justify-content:flex-end; margin-top:.5rem;">
+      <button class="btn" id="run-btn" onclick="runCouncil()">
+        Convene the council
+      </button>
+    </div>
+  </div>
+
+  <div id="error-msg" class="error-msg" role="alert"></div>
+
+  <div class="timeline" id="timeline" aria-live="polite">
+    <div class="stage-chip" id="chip1">
+      <div class="stage-label">Stage 1</div>
+      Independent analysis
+    </div>
+    <div class="stage-chip" id="chip2">
+      <div class="stage-label">Stage 2</div>
+      Anonymous peer review
+    </div>
+    <div class="stage-chip" id="chip3">
+      <div class="stage-label">Stage 3</div>
+      Chairman verdict
+    </div>
+  </div>
+
+  <div id="verdict-stamp" role="region" aria-label="Verdict">
+    <div class="verdict-line" id="verdict-decision"></div>
+    <div class="confidence" id="verdict-confidence"></div>
+    <div class="one-liner" id="verdict-one-liner"></div>
+    <div class="verdict-body" id="verdict-body"></div>
+  </div>
+
+  <div id="rankings-section">
+    <div class="section-title">Anonymous ranking (lower avg = stronger analysis)</div>
+    <table>
+      <thead><tr><th>Rank</th><th>Response</th><th>Model</th><th>Avg position</th></tr></thead>
+      <tbody id="rankings-body"></tbody>
+    </table>
+  </div>
+
+  <div id="analyses-section">
+    <div class="section-title">Council analyses</div>
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <div id="cards"></div>
+  </div>
+</div>
+
+<script>
+const state = {
+  models: [],
+  letters: [],
+  analyses: {},   // letter → {model, content, error}
+  avgRanks: {},
+};
+
+function setStage(n, status) {
+  const chip = document.getElementById('chip' + n);
+  if (!chip) return;
+  chip.className = 'stage-chip ' + status;  // active | done | ''
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+function upsertTab(letter) {
+  const tabs = document.getElementById('tabs');
+  if (document.getElementById('tab-' + letter)) return;
+  const tab = document.createElement('button');
+  tab.id = 'tab-' + letter;
+  tab.className = 'tab';
+  tab.role = 'tab';
+  tab.setAttribute('aria-controls', 'card-' + letter);
+  tab.onclick = () => activateTab(letter);
+  tab.textContent = 'Response ' + letter + ' …';
+  tabs.appendChild(tab);
+
+  const card = document.createElement('div');
+  card.id = 'card-' + letter;
+  card.className = 'card';
+  card.innerHTML = '<span class="spinner"></span> Waiting<span class="loading-dot"></span>';
+  document.getElementById('cards').appendChild(card);
+
+  document.getElementById('analyses-section').style.display = 'block';
+  if (!document.querySelector('.tab.active')) activateTab(letter);
+}
+
+function activateTab(letter) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+  const tab = document.getElementById('tab-' + letter);
+  const card = document.getElementById('card-' + letter);
+  if (tab) tab.classList.add('active');
+  if (card) card.classList.add('active');
+}
+
+function updateAnalysis(letter, model, content, error) {
+  state.analyses[letter] = { model, content, error };
+  const tab = document.getElementById('tab-' + letter);
+  const card = document.getElementById('card-' + letter);
+  if (!tab || !card) return;
+
+  const shortModel = model.split('/').pop();
+  if (error) {
+    tab.textContent = 'Response ' + letter + ' ✗';
+    tab.classList.add('error');
+    card.innerHTML = '<p style="color:var(--kill)">Error: ' + escHtml(error) + '</p>';
+  } else {
+    tab.textContent = 'Response ' + letter + ' — ' + shortModel;
+    card.innerHTML = '<div class="analysis-text">' + escHtml(content) + '</div>';
+  }
+}
+
+function renderRankings(avgRanks, letters) {
+  const modelMap = {};
+  letters.forEach(l => {
+    if (state.analyses[l]) modelMap[l] = state.analyses[l].model || l;
+  });
+
+  const sorted = [...letters].sort((a, b) => (avgRanks[a] || 99) - (avgRanks[b] || 99));
+  const tbody = document.getElementById('rankings-body');
+  tbody.innerHTML = '';
+  sorted.forEach((letter, idx) => {
+    const rank = idx + 1;
+    const cls = rank <= 3 ? 'rank-' + rank : '';
+    const model = modelMap[letter] || '?';
+    const avg = avgRanks[letter] != null ? avgRanks[letter].toFixed(1) : '?';
+    tbody.innerHTML += `<tr>
+      <td><span class="rank-badge ${cls}">${rank}</span></td>
+      <td>Response ${letter}</td>
+      <td>${escHtml(model)}</td>
+      <td>${avg}</td>
+    </tr>`;
+  });
+  document.getElementById('rankings-section').style.display = 'block';
+}
+
+function parseVerdict(raw) {
+  const m = raw.match(/VERDICT:\s*(GO|CONDITIONAL GO|PIVOT|KILL)[^%]*?(\d+)%/i);
+  const decision = m ? m[1].toUpperCase() : 'UNKNOWN';
+  const confidence = m ? m[2] : '?';
+  const classMap = { 'GO': 'GO', 'CONDITIONAL GO': 'CGO', 'PIVOT': 'PIVOT', 'KILL': 'KILL' };
+  const cls = classMap[decision] || '';
+
+  const oneM = raw.match(/ONE-LINE WHY:\s*(.+)/i);
+  const oneLiner = oneM ? oneM[1].trim() : '';
+
+  // body = everything after ONE-LINE WHY
+  const bodyStart = raw.indexOf('STRONGEST CASE FOR');
+  const body = bodyStart >= 0 ? raw.slice(bodyStart) : raw;
+
+  const stamp = document.getElementById('verdict-stamp');
+  stamp.className = cls;
+  stamp.style.display = 'block';
+  document.getElementById('verdict-decision').textContent = decision;
+  document.getElementById('verdict-confidence').textContent = 'Confidence: ' + confidence + '%';
+  document.getElementById('verdict-one-liner').textContent = oneLiner;
+  document.getElementById('verdict-body').textContent = body;
+}
+
+function escHtml(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function runCouncil() {
+  const idea = document.getElementById('idea-input').value.trim();
+  if (!idea) { showError('Please enter a business idea.'); return; }
+
+  // reset
+  document.getElementById('error-msg').style.display = 'none';
+  document.getElementById('verdict-stamp').style.display = 'none';
+  document.getElementById('rankings-section').style.display = 'none';
+  document.getElementById('analyses-section').style.display = 'none';
+  document.getElementById('tabs').innerHTML = '';
+  document.getElementById('cards').innerHTML = '';
+  document.getElementById('rankings-body').innerHTML = '';
+  [1,2,3].forEach(n => setStage(n, ''));
+  Object.assign(state, { models: [], letters: [], analyses: {}, avgRanks: {} });
+
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Convening…';
+
+  try {
+    const resp = await fetch('/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idea }),
+    });
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        handleEvent(ev);
+      }
+    }
+  } catch (e) {
+    showError('Connection error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Convene the council';
+  }
+}
+
+function handleEvent(ev) {
+  switch (ev.event) {
+    case 'stage': {
+      const n = ev.stage;
+      if (ev.status === 'start') {
+        setStage(n, 'active');
+        if (n === 1 && ev.models) {
+          state.models = ev.models;
+          ev.models.forEach((_, i) => {
+            const letter = String.fromCharCode(65 + i);
+            state.letters.push(letter);
+            upsertTab(letter);
+          });
+        }
+      } else if (ev.status === 'done') {
+        setStage(n, 'done');
+      }
+      break;
+    }
+    case 'stage1_result': {
+      upsertTab(ev.letter);
+      updateAnalysis(ev.letter, ev.model, ev.content, ev.error);
+      break;
+    }
+    case 'stage2_result': {
+      // just update rankings silently; we show them after aggregation
+      break;
+    }
+    case 'rankings': {
+      state.avgRanks = ev.avg_ranks;
+      renderRankings(ev.avg_ranks, ev.letters);
+      break;
+    }
+    case 'verdict': {
+      parseVerdict(ev.content);
+      break;
+    }
+    case 'error': {
+      showError(ev.message);
+      break;
+    }
+    case 'done':
+      break;
+  }
+}
+
+// Submit on Ctrl+Enter
+document.getElementById('idea-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runCouncil();
+});
+</script>
+</body>
+</html>
