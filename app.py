@@ -25,6 +25,12 @@ from prompts import (
     STAGE2_USER_TEMPLATE,
     STAGE3_SYSTEM,
     STAGE3_USER_TEMPLATE,
+    FOLLOWUP_STAGE1_SYSTEM,
+    FOLLOWUP_STAGE1_USER_TEMPLATE,
+    FOLLOWUP_STAGE2_SYSTEM,
+    FOLLOWUP_STAGE2_USER_TEMPLATE,
+    FOLLOWUP_STAGE3_SYSTEM,
+    FOLLOWUP_STAGE3_USER_TEMPLATE,
 )
 
 load_dotenv()
@@ -271,6 +277,180 @@ async def validate(req: ValidateRequest):
             return
 
         yield sse("stage", {"stage": 3, "status": "done"})
+        yield sse("done", {})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── Follow-up chat ───────────────────────────────────────────────────────────
+# The council continues the conversation after the verdict. Stateless: the
+# frontend sends back the full context (idea, verdict, original analyses, and the
+# running Q/A history) with every question. Same 3-stage method as /validate:
+# each member answers → anonymous peer review → chairman synthesizes one reply.
+
+
+class ChatAnalysis(BaseModel):
+    letter: str
+    model: str
+    content: str
+
+
+class ChatTurn(BaseModel):
+    question: str
+    answer: str
+
+
+class ChatRequest(BaseModel):
+    idea: str
+    verdict: str = ""
+    analyses: list[ChatAnalysis] = []
+    history: list[ChatTurn] = []
+    question: str
+
+
+def format_history(history: list[ChatTurn]) -> str:
+    if not history:
+        return "(no prior follow-up questions yet)"
+    parts = []
+    for i, turn in enumerate(history, 1):
+        parts.append(f"Q{i} (founder): {turn.question}\nA{i} (council): {turn.answer}")
+    return "\n\n".join(parts)
+
+
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    async def stream() -> AsyncGenerator[str, None]:
+        question = req.question.strip()
+        if not question:
+            yield sse("error", {"message": "No question provided."})
+            return
+        if not OPENROUTER_API_KEY:
+            yield sse("error", {"message": "OPENROUTER_API_KEY not set."})
+            return
+
+        participants = [a for a in req.analyses if a.content and a.model]
+        if not participants:
+            yield sse("error", {"message": "No council context provided."})
+            return
+
+        history_str = format_history(req.history)
+
+        # ── Stage 1 — each member answers the follow-up ──────────────────────
+        yield sse("chat_stage", {"stage": 1, "status": "start"})
+
+        followup_answers: dict[str, str] = {}  # letter → content
+        member_models: dict[str, str] = {}     # letter → model
+
+        async with httpx.AsyncClient() as client:
+
+            async def fetch_answer(a: ChatAnalysis):
+                try:
+                    content = await call_model(
+                        client,
+                        a.model,
+                        FOLLOWUP_STAGE1_SYSTEM,
+                        FOLLOWUP_STAGE1_USER_TEMPLATE.format(
+                            idea=req.idea,
+                            verdict=req.verdict or "(verdict unavailable)",
+                            history=history_str,
+                            question=question,
+                        ),
+                        temperature=0.5,
+                    )
+                    return a.letter, a.model, content, None
+                except Exception as exc:
+                    return a.letter, a.model, None, str(exc)
+
+            tasks = [fetch_answer(a) for a in participants]
+            for coro in asyncio.as_completed(tasks):
+                letter, model, content, error = await coro
+                if error:
+                    yield sse(
+                        "chat_stage1_result",
+                        {"letter": letter, "model": model, "error": error},
+                    )
+                else:
+                    followup_answers[letter] = content
+                    member_models[letter] = model
+                    yield sse(
+                        "chat_stage1_result",
+                        {"letter": letter, "model": model, "content": content},
+                    )
+
+        valid_letters = list(followup_answers.keys())
+        if not valid_letters:
+            yield sse("error", {"message": "All council members failed to answer."})
+            return
+        yield sse("chat_stage", {"stage": 1, "status": "done"})
+
+        # ── Stage 2 — anonymous peer review (only with ≥ 2 answers) ──────────
+        avg_ranks: dict[str, float] = {l: 1.0 for l in valid_letters}
+        if len(valid_letters) >= 2:
+            yield sse("chat_stage", {"stage": 2, "status": "start"})
+
+            anon_block = "\n\n---\n\n".join(
+                f"Response {l}:\n{followup_answers[l]}" for l in valid_letters
+            )
+            stage2_rankings: list[dict[str, int]] = []
+
+            async with httpx.AsyncClient() as client:
+
+                async def review(letter: str, model: str):
+                    try:
+                        content = await call_model(
+                            client,
+                            model,
+                            FOLLOWUP_STAGE2_SYSTEM,
+                            FOLLOWUP_STAGE2_USER_TEMPLATE.format(
+                                question=question, analyses=anon_block
+                            ),
+                            temperature=0.4,
+                        )
+                        return parse_ranking(content, valid_letters), None
+                    except Exception as exc:
+                        return {}, str(exc)
+
+                tasks = [review(l, member_models[l]) for l in valid_letters]
+                for coro in asyncio.as_completed(tasks):
+                    ranking, error = await coro
+                    if not error and ranking:
+                        stage2_rankings.append(ranking)
+
+            if stage2_rankings:
+                avg_ranks = aggregate_rankings(stage2_rankings, valid_letters)
+            yield sse("chat_rankings", {"avg_ranks": avg_ranks, "letters": valid_letters})
+            yield sse("chat_stage", {"stage": 2, "status": "done"})
+
+        # ── Stage 3 — chairman synthesizes one reply ─────────────────────────
+        yield sse("chat_stage", {"stage": 3, "status": "start", "chairman": CHAIRMAN_MODEL})
+
+        sorted_letters = sorted(valid_letters, key=lambda l: avg_ranks.get(l, 999))
+        analyses_with_ranks = "\n\n---\n\n".join(
+            f"Response {l} (avg rank: {avg_ranks.get(l, 999.0):.1f}):\n{followup_answers[l]}"
+            for l in sorted_letters
+        )
+
+        try:
+            async with httpx.AsyncClient() as client:
+                answer = await call_model(
+                    client,
+                    CHAIRMAN_MODEL,
+                    FOLLOWUP_STAGE3_SYSTEM,
+                    FOLLOWUP_STAGE3_USER_TEMPLATE.format(
+                        idea=req.idea,
+                        verdict=req.verdict or "(verdict unavailable)",
+                        history=history_str,
+                        question=question,
+                        analyses_with_ranks=analyses_with_ranks,
+                    ),
+                    temperature=0.3,
+                )
+            yield sse("chat_answer", {"content": answer})
+        except Exception as exc:
+            yield sse("error", {"message": f"Chairman failed: {exc}"})
+            return
+
+        yield sse("chat_stage", {"stage": 3, "status": "done"})
         yield sse("done", {})
 
     return StreamingResponse(stream(), media_type="text/event-stream")

@@ -44,6 +44,18 @@ GO / CONDITIONAL GO / PIVOT / KILL.
 
 Calls per run: `(council size × 2) + 1`. Nothing is stored between runs (stateless).
 
+**Follow-up chat**
+After the verdict you can keep talking to the council. Each follow-up question
+re-runs the full method on that question: every council member answers, they
+anonymously peer-review each other's answers, and the chairman synthesizes one
+reply — anti-sycophantic, and willing to revise the verdict if you give new
+information. Expand *Individual council answers* under any reply to see each
+model's take before synthesis.
+
+Calls per follow-up: `(council size × 2) + 1`, same as a full run. The session
+stays stateless — the browser holds the idea, verdict, and conversation history
+and sends them back with each question, so refreshing the page clears it.
+
 ## Configuration
 
 All config lives in `.env` — no code changes needed to swap models:

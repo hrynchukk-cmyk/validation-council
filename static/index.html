@@ -210,6 +210,48 @@
     50% { content: '..'; }
     75% { content: '...'; }
   }
+
+  /* Follow-up chat */
+  #chat-section { display: none; margin-top: 2rem; }
+  .chat-messages { display: flex; flex-direction: column; gap: .75rem; margin-bottom: 1rem; }
+  .chat-msg {
+    padding: .75rem 1rem;
+    border-radius: .75rem;
+    max-width: 90%;
+    font-size: .9rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .chat-msg.user { align-self: flex-end; background: var(--accent); color: #fff; }
+  .chat-msg.council { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
+  .chat-msg .chat-status { color: var(--muted); font-size: .85rem; }
+  .chat-msg .breakdown { margin-top: .65rem; }
+  .chat-msg .breakdown summary { cursor: pointer; color: var(--muted); font-size: .8rem; outline: none; }
+  .chat-msg .breakdown summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .chat-msg .breakdown .member { margin-top: .5rem; padding-top: .5rem; border-top: 1px solid var(--border); font-size: .85rem; }
+  .chat-msg .breakdown .member-name { font-weight: 600; font-size: .78rem; color: var(--muted); margin-bottom: .25rem; }
+  .chat-input-box {
+    display: flex;
+    gap: .5rem;
+    align-items: flex-end;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: .75rem;
+    padding: .75rem;
+  }
+  .chat-input-box textarea {
+    flex: 1;
+    min-height: 52px;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-size: .95rem;
+    resize: vertical;
+    outline: none;
+    font-family: inherit;
+  }
+  .chat-input-box textarea::placeholder { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -263,6 +305,15 @@
     <div class="tabs" id="tabs" role="tablist"></div>
     <div id="cards"></div>
   </div>
+
+  <div id="chat-section">
+    <div class="section-title">Continue with the council</div>
+    <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
+    <div class="chat-input-box">
+      <textarea id="chat-input" placeholder="Ask a follow-up question — the whole council answers again, the chairman replies." aria-label="Follow-up question"></textarea>
+      <button class="btn" id="chat-send-btn" onclick="sendChat()">Ask</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -271,6 +322,9 @@ const state = {
   letters: [],
   analyses: {},   // letter → {model, content, error}
   avgRanks: {},
+  idea: '',
+  verdictRaw: '',
+  chatHistory: [],  // [{question, answer}]
 };
 
 function setStage(n, status) {
@@ -371,6 +425,8 @@ function parseVerdict(raw) {
   const bodyStart = raw.indexOf('STRONGEST CASE FOR');
   const body = bodyStart >= 0 ? raw.slice(bodyStart) : raw;
 
+  state.verdictRaw = raw;
+
   const stamp = document.getElementById('verdict-stamp');
   stamp.className = cls;
   stamp.style.display = 'block';
@@ -396,8 +452,13 @@ async function runCouncil() {
   document.getElementById('tabs').innerHTML = '';
   document.getElementById('cards').innerHTML = '';
   document.getElementById('rankings-body').innerHTML = '';
+  document.getElementById('chat-section').style.display = 'none';
+  document.getElementById('chat-messages').innerHTML = '';
   [1,2,3].forEach(n => setStage(n, ''));
-  Object.assign(state, { models: [], letters: [], analyses: {}, avgRanks: {} });
+  Object.assign(state, {
+    models: [], letters: [], analyses: {}, avgRanks: {},
+    idea, verdictRaw: '', chatHistory: [],
+  });
 
   const btn = document.getElementById('run-btn');
   btn.disabled = true;
@@ -476,13 +537,149 @@ function handleEvent(ev) {
       break;
     }
     case 'done':
+      // Enable the follow-up chat once a verdict has been rendered.
+      if (state.verdictRaw) {
+        document.getElementById('chat-section').style.display = 'block';
+      }
       break;
+  }
+}
+
+// ── Follow-up chat ───────────────────────────────────────────────────────────
+
+function appendChatMsg(role, html) {
+  const wrap = document.getElementById('chat-messages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg ' + role;
+  div.innerHTML = html;
+  wrap.appendChild(div);
+  div.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  return div;
+}
+
+function setChatStatus(bubble, text) {
+  bubble.innerHTML = '<span class="spinner"></span> <span class="chat-status">' + escHtml(text) + '</span>';
+}
+
+function renderCouncilAnswer(bubble, answer, members) {
+  let html = '<div class="answer-text">' + escHtml(answer) + '</div>';
+  const letters = Object.keys(members).sort();
+  if (letters.length) {
+    let inner = '';
+    letters.forEach(l => {
+      const m = members[l];
+      const name = (m.model || '').split('/').pop() || ('Response ' + l);
+      if (m.error) {
+        inner += '<div class="member"><div class="member-name">' + escHtml(name) +
+                 ' ✗</div><span style="color:var(--kill)">' + escHtml(m.error) + '</span></div>';
+      } else {
+        inner += '<div class="member"><div class="member-name">' + escHtml(name) +
+                 '</div>' + escHtml(m.content) + '</div>';
+      }
+    });
+    html += '<details class="breakdown"><summary>Individual council answers (' +
+            letters.length + ')</summary>' + inner + '</details>';
+  }
+  bubble.innerHTML = html;
+  bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('chat-send-btn');
+  const question = input.value.trim();
+  if (!question) return;
+
+  const analyses = state.letters
+    .filter(l => state.analyses[l] && state.analyses[l].content && !state.analyses[l].error)
+    .map(l => ({ letter: l, model: state.analyses[l].model, content: state.analyses[l].content }));
+  if (analyses.length === 0) {
+    appendChatMsg('council', '<span style="color:var(--kill)">No council context available — run an analysis first.</span>');
+    return;
+  }
+
+  appendChatMsg('user', escHtml(question));
+  input.value = '';
+  input.disabled = true;
+  sendBtn.disabled = true;
+
+  const bubble = appendChatMsg('council', '');
+  setChatStatus(bubble, 'Council deliberating…');
+  const members = {};  // letter → {model, content, error}
+
+  const stageLabels = {
+    1: 'Council deliberating…',
+    2: 'Anonymous peer review…',
+    3: 'Chairman synthesizing…',
+  };
+
+  try {
+    const resp = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idea: state.idea,
+        verdict: state.verdictRaw,
+        analyses,
+        history: state.chatHistory,
+        question,
+      }),
+    });
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    let finalAnswer = '';
+    let errored = false;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        switch (ev.event) {
+          case 'chat_stage':
+            if (ev.status === 'start') setChatStatus(bubble, stageLabels[ev.stage] || 'Working…');
+            break;
+          case 'chat_stage1_result':
+            members[ev.letter] = { model: ev.model, content: ev.content, error: ev.error };
+            break;
+          case 'chat_answer':
+            finalAnswer = ev.content;
+            break;
+          case 'error':
+            errored = true;
+            bubble.innerHTML = '<span style="color:var(--kill)">Error: ' + escHtml(ev.message) + '</span>';
+            break;
+        }
+      }
+    }
+
+    if (!errored && finalAnswer) {
+      renderCouncilAnswer(bubble, finalAnswer, members);
+      state.chatHistory.push({ question, answer: finalAnswer });
+    } else if (!errored && !finalAnswer) {
+      bubble.innerHTML = '<span style="color:var(--kill)">The council returned no answer.</span>';
+    }
+  } catch (e) {
+    bubble.innerHTML = '<span style="color:var(--kill)">Connection error: ' + escHtml(e.message) + '</span>';
+  } finally {
+    input.disabled = false;
+    sendBtn.disabled = false;
+    input.focus();
   }
 }
 
 // Submit on Ctrl+Enter
 document.getElementById('idea-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runCouncil();
+});
+document.getElementById('chat-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendChat();
 });
 </script>
 </body>
