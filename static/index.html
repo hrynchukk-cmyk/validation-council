@@ -212,7 +212,7 @@
   }
 
   /* Follow-up chat */
-  #chat-section { display: none; margin-top: 2rem; }
+  #chat-section, #discover-chat-section { display: none; margin-top: 2rem; }
   .chat-messages { display: flex; flex-direction: column; gap: .75rem; margin-bottom: 1rem; }
   .chat-msg {
     padding: .75rem 1rem;
@@ -401,6 +401,15 @@
       <div class="section-title">Council proposals (before synthesis)</div>
       <div class="tabs" id="dtabs" role="tablist"></div>
       <div id="dcards"></div>
+    </div>
+
+    <div id="discover-chat-section">
+      <div class="section-title">Continue with the council</div>
+      <div class="chat-messages" id="discover-chat-messages" aria-live="polite"></div>
+      <div class="chat-input-box">
+        <textarea id="discover-chat-input" placeholder="Ask a follow-up about these ideas — the whole council answers again, the chairman replies." aria-label="Follow-up question about the ideas"></textarea>
+        <button class="btn" id="discover-chat-send-btn" onclick="sendDiscoverChat()">Ask</button>
+      </div>
     </div>
   </div><!-- /view-discover -->
 </div>
@@ -636,8 +645,8 @@ function handleEvent(ev) {
 
 // ── Follow-up chat ───────────────────────────────────────────────────────────
 
-function appendChatMsg(role, html) {
-  const wrap = document.getElementById('chat-messages');
+function appendChatMsg(role, html, containerId) {
+  const wrap = document.getElementById(containerId || 'chat-messages');
   const div = document.createElement('div');
   div.className = 'chat-msg ' + role;
   div.innerHTML = html;
@@ -673,26 +682,16 @@ function renderCouncilAnswer(bubble, answer, members) {
   bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
 }
 
-async function sendChat() {
-  const input = document.getElementById('chat-input');
-  const sendBtn = document.getElementById('chat-send-btn');
-  const question = input.value.trim();
-  if (!question) return;
-
-  const analyses = state.letters
-    .filter(l => state.analyses[l] && state.analyses[l].content && !state.analyses[l].error)
-    .map(l => ({ letter: l, model: state.analyses[l].model, content: state.analyses[l].content }));
-  if (analyses.length === 0) {
-    appendChatMsg('council', '<span style="color:var(--kill)">No council context available — run an analysis first.</span>');
-    return;
-  }
-
-  appendChatMsg('user', escHtml(question));
-  input.value = '';
-  input.disabled = true;
+// Shared streaming loop for both follow-up chats. Renders user + council bubbles
+// in `containerId`, streams the chat_* SSE events, and pushes the Q/A to history.
+async function streamCouncilChat({ endpoint, payload, containerId, history, inputEl, sendBtn }) {
+  const question = payload.question;
+  appendChatMsg('user', escHtml(question), containerId);
+  inputEl.value = '';
+  inputEl.disabled = true;
   sendBtn.disabled = true;
 
-  const bubble = appendChatMsg('council', '');
+  const bubble = appendChatMsg('council', '', containerId);
   setChatStatus(bubble, 'Council deliberating…');
   const members = {};  // letter → {model, content, error}
 
@@ -703,16 +702,10 @@ async function sendChat() {
   };
 
   try {
-    const resp = await fetch('/chat', {
+    const resp = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        idea: state.idea,
-        verdict: state.verdictRaw,
-        analyses,
-        history: state.chatHistory,
-        question,
-      }),
+      body: JSON.stringify(payload),
     });
 
     const reader = resp.body.getReader();
@@ -750,17 +743,71 @@ async function sendChat() {
 
     if (!errored && finalAnswer) {
       renderCouncilAnswer(bubble, finalAnswer, members);
-      state.chatHistory.push({ question, answer: finalAnswer });
+      history.push({ question, answer: finalAnswer });
     } else if (!errored && !finalAnswer) {
       bubble.innerHTML = '<span style="color:var(--kill)">The council returned no answer.</span>';
     }
   } catch (e) {
     bubble.innerHTML = '<span style="color:var(--kill)">Connection error: ' + escHtml(e.message) + '</span>';
   } finally {
-    input.disabled = false;
+    inputEl.disabled = false;
     sendBtn.disabled = false;
-    input.focus();
+    inputEl.focus();
   }
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('chat-send-btn');
+  const question = input.value.trim();
+  if (!question) return;
+
+  const analyses = state.letters
+    .filter(l => state.analyses[l] && state.analyses[l].content && !state.analyses[l].error)
+    .map(l => ({ letter: l, model: state.analyses[l].model, content: state.analyses[l].content }));
+  if (analyses.length === 0) {
+    appendChatMsg('council', '<span style="color:var(--kill)">No council context available — run an analysis first.</span>');
+    return;
+  }
+
+  await streamCouncilChat({
+    endpoint: '/chat',
+    payload: { idea: state.idea, verdict: state.verdictRaw, analyses, history: state.chatHistory, question },
+    containerId: 'chat-messages',
+    history: state.chatHistory,
+    inputEl: input,
+    sendBtn,
+  });
+}
+
+async function sendDiscoverChat() {
+  const input = document.getElementById('discover-chat-input');
+  const sendBtn = document.getElementById('discover-chat-send-btn');
+  const question = input.value.trim();
+  if (!question) return;
+
+  const proposals = discoverState.letters
+    .filter(l => discoverState.proposals[l] && discoverState.proposals[l].content && !discoverState.proposals[l].error)
+    .map(l => ({ letter: l, model: discoverState.proposals[l].model, content: discoverState.proposals[l].content }));
+  if (proposals.length === 0) {
+    appendChatMsg('council', '<span style="color:var(--kill)">No council context available — find ideas first.</span>', 'discover-chat-messages');
+    return;
+  }
+
+  await streamCouncilChat({
+    endpoint: '/discover_chat',
+    payload: {
+      constraints: discoverState.constraints,
+      ideas: discoverState.ideasRaw,
+      proposals,
+      history: discoverState.chatHistory,
+      question,
+    },
+    containerId: 'discover-chat-messages',
+    history: discoverState.chatHistory,
+    inputEl: input,
+    sendBtn,
+  });
 }
 
 // ── Mode switching ───────────────────────────────────────────────────────────
@@ -775,7 +822,10 @@ function switchMode(mode) {
 
 // ── Discover mode (council in reverse) ───────────────────────────────────────
 
-const discoverState = { models: [], letters: [], proposals: {} };
+const discoverState = {
+  models: [], letters: [], proposals: {},
+  constraints: '', ideasRaw: '', chatHistory: [],
+};
 
 function setDStage(n, status) {
   const chip = document.getElementById('dchip' + n);
@@ -908,12 +958,17 @@ function handleDEvent(ev) {
     case 'rankings':
       break;  // ranking is internal here; the top-3 is the deliverable
     case 'ideas':
+      discoverState.ideasRaw = ev.content;
       renderIdeas(ev.content);
       break;
     case 'error':
       showDError(ev.message);
       break;
     case 'done':
+      // Enable the follow-up chat once the top-3 has been rendered.
+      if (discoverState.ideasRaw) {
+        document.getElementById('discover-chat-section').style.display = 'block';
+      }
       break;
   }
 }
@@ -927,8 +982,13 @@ async function runDiscover() {
   document.getElementById('idea-cards').innerHTML = '';
   document.getElementById('dtabs').innerHTML = '';
   document.getElementById('dcards').innerHTML = '';
+  document.getElementById('discover-chat-section').style.display = 'none';
+  document.getElementById('discover-chat-messages').innerHTML = '';
   [1, 2, 3].forEach(n => setDStage(n, ''));
-  Object.assign(discoverState, { models: [], letters: [], proposals: {} });
+  Object.assign(discoverState, {
+    models: [], letters: [], proposals: {},
+    constraints, ideasRaw: '', chatHistory: [],
+  });
 
   const btn = document.getElementById('discover-run-btn');
   btn.disabled = true;
@@ -973,6 +1033,9 @@ document.getElementById('chat-input').addEventListener('keydown', e => {
 });
 document.getElementById('discover-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runDiscover();
+});
+document.getElementById('discover-chat-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendDiscoverChat();
 });
 </script>
 </body>

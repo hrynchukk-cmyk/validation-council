@@ -74,6 +74,12 @@ Give optional constraints (market, B2B/B2C, your skills, a domain) or leave it
 empty to scan broadly. Calls per run: `(council size × 2) + 1`. Expand
 *Council proposals* to see each model's raw ideas before synthesis.
 
+Like the validate tab, Discover has a **follow-up chat**: after the top 3 are
+shown you can ask the council to go deeper on an idea or weigh a variation, and
+the same answer → peer review → chairman synthesis runs again — staying anti-hype
+and tracing every recommendation back to who pays. Calls per follow-up:
+`(council size × 2) + 1`.
+
 ## Configuration
 
 All config lives in `.env` — no code changes needed to swap models:
