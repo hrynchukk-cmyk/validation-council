@@ -252,6 +252,49 @@
     font-family: inherit;
   }
   .chat-input-box textarea::placeholder { color: var(--muted); }
+
+  /* Mode tabs */
+  .mode-tabs { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
+  .mode-tab {
+    flex: 1;
+    text-align: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: .5rem;
+    padding: .65rem 1rem;
+    cursor: pointer;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: .9rem;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .mode-tab:hover { border-color: var(--accent); color: var(--text); }
+  .mode-tab.active { border-color: var(--accent); color: var(--text); background: #1e1b4b; }
+  .mode-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Discover — idea cards */
+  #ideas-section { display: none; margin-bottom: 1.5rem; }
+  #discover-analyses-section { display: none; margin-bottom: 1.5rem; }
+  .idea-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: .75rem;
+    padding: 1rem 1.25rem;
+    margin-bottom: .75rem;
+  }
+  .idea-card h3 { font-size: 1.05rem; margin-bottom: .6rem; color: var(--text); line-height: 1.4; }
+  .idea-card .field { margin-bottom: .5rem; font-size: .875rem; line-height: 1.55; white-space: pre-wrap; }
+  .idea-card .field-label {
+    display: block;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: .68rem;
+    letter-spacing: .05em;
+    margin-bottom: .1rem;
+  }
+  .idea-card .field.signal .field-label { color: var(--go); }
 </style>
 </head>
 <body>
@@ -259,6 +302,12 @@
   <h1>⚖️ Validation Council</h1>
   <p class="subtitle">Multiple LLMs validate your business idea — anonymously, anti-sycophantically. Real validation = people paying or refusing; the council decides <em>what to test first</em>.</p>
 
+  <div class="mode-tabs" role="tablist">
+    <button class="mode-tab active" id="mode-validate" role="tab" onclick="switchMode('validate')">⚖️ Validate an idea</button>
+    <button class="mode-tab" id="mode-discover" role="tab" onclick="switchMode('discover')">💡 Discover ideas</button>
+  </div>
+
+  <div id="view-validate">
   <div class="input-box">
     <textarea id="idea-input" placeholder="Describe your business idea in 2–10 sentences. The more specific, the sharper the verdict." aria-label="Business idea"></textarea>
     <div style="display:flex; justify-content:flex-end; margin-top:.5rem;">
@@ -314,6 +363,46 @@
       <button class="btn" id="chat-send-btn" onclick="sendChat()">Ask</button>
     </div>
   </div>
+  </div><!-- /view-validate -->
+
+  <div id="view-discover" style="display:none;">
+    <p class="subtitle">The council in reverse — instead of judging your idea, it proposes the <em>top 3 ideas with a real signal of willingness to pay</em> (people already spending money on the problem), using the same anti-sycophantic method.</p>
+
+    <div class="input-box">
+      <textarea id="discover-input" placeholder="Optional constraints — market (e.g. UA / global), B2B or B2C, your skills, budget, a domain you know. Leave empty to let the council scan broadly for the strongest payment signals." aria-label="Constraints for idea discovery"></textarea>
+      <div style="display:flex; justify-content:flex-end; margin-top:.5rem;">
+        <button class="btn" id="discover-run-btn" onclick="runDiscover()">Find ideas with a payment signal</button>
+      </div>
+    </div>
+
+    <div id="discover-error" class="error-msg" role="alert"></div>
+
+    <div class="timeline" id="discover-timeline" aria-live="polite">
+      <div class="stage-chip" id="dchip1">
+        <div class="stage-label">Stage 1</div>
+        Idea generation
+      </div>
+      <div class="stage-chip" id="dchip2">
+        <div class="stage-label">Stage 2</div>
+        Anonymous peer review
+      </div>
+      <div class="stage-chip" id="dchip3">
+        <div class="stage-label">Stage 3</div>
+        Chairman's top 3
+      </div>
+    </div>
+
+    <div id="ideas-section">
+      <div class="section-title">Top 3 ideas with a payment signal</div>
+      <div id="idea-cards"></div>
+    </div>
+
+    <div id="discover-analyses-section">
+      <div class="section-title">Council proposals (before synthesis)</div>
+      <div class="tabs" id="dtabs" role="tablist"></div>
+      <div id="dcards"></div>
+    </div>
+  </div><!-- /view-discover -->
 </div>
 
 <script>
@@ -674,12 +763,216 @@ async function sendChat() {
   }
 }
 
+// ── Mode switching ───────────────────────────────────────────────────────────
+
+function switchMode(mode) {
+  const isValidate = mode === 'validate';
+  document.getElementById('view-validate').style.display = isValidate ? 'block' : 'none';
+  document.getElementById('view-discover').style.display = isValidate ? 'none' : 'block';
+  document.getElementById('mode-validate').classList.toggle('active', isValidate);
+  document.getElementById('mode-discover').classList.toggle('active', !isValidate);
+}
+
+// ── Discover mode (council in reverse) ───────────────────────────────────────
+
+const discoverState = { models: [], letters: [], proposals: {} };
+
+function setDStage(n, status) {
+  const chip = document.getElementById('dchip' + n);
+  if (chip) chip.className = 'stage-chip ' + status;
+}
+
+function showDError(msg) {
+  const el = document.getElementById('discover-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+function dUpsertTab(letter) {
+  const tabs = document.getElementById('dtabs');
+  if (document.getElementById('dtab-' + letter)) return;
+  const tab = document.createElement('button');
+  tab.id = 'dtab-' + letter;
+  tab.className = 'tab';
+  tab.role = 'tab';
+  tab.onclick = () => dActivateTab(letter);
+  tab.textContent = 'Response ' + letter + ' …';
+  tabs.appendChild(tab);
+
+  const card = document.createElement('div');
+  card.id = 'dcard-' + letter;
+  card.className = 'card';
+  card.innerHTML = '<span class="spinner"></span> Waiting<span class="loading-dot"></span>';
+  document.getElementById('dcards').appendChild(card);
+
+  document.getElementById('discover-analyses-section').style.display = 'block';
+  if (!document.querySelector('#dtabs .tab.active')) dActivateTab(letter);
+}
+
+function dActivateTab(letter) {
+  document.querySelectorAll('#dtabs .tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('#dcards .card').forEach(c => c.classList.remove('active'));
+  const tab = document.getElementById('dtab-' + letter);
+  const card = document.getElementById('dcard-' + letter);
+  if (tab) tab.classList.add('active');
+  if (card) card.classList.add('active');
+}
+
+function updateProposal(letter, model, content, error) {
+  discoverState.proposals[letter] = { model, content, error };
+  const tab = document.getElementById('dtab-' + letter);
+  const card = document.getElementById('dcard-' + letter);
+  if (!tab || !card) return;
+  const shortModel = (model || '').split('/').pop();
+  if (error) {
+    tab.textContent = 'Response ' + letter + ' ✗';
+    tab.classList.add('error');
+    card.innerHTML = '<p style="color:var(--kill)">Error: ' + escHtml(error) + '</p>';
+  } else {
+    tab.textContent = 'Response ' + letter + ' — ' + shortModel;
+    card.innerHTML = '<div class="analysis-text">' + escHtml(content) + '</div>';
+  }
+}
+
+function buildIdeaCard(block) {
+  const card = document.createElement('div');
+  card.className = 'idea-card';
+  const titleM = block.match(/^IDEA\s*\d+\s*[:\-]\s*(.+)/i);
+  const title = titleM ? titleM[1].trim() : 'Idea';
+  const stop = '(?=\\n[A-Z][A-Z &]+[:\\-]|$)';
+  const fields = [
+    ['Payment signal', 'PAYMENT SIGNAL', true],
+    ['Why now', 'WHY NOW', false],
+    ['Riskiest assumption', 'RISKIEST ASSUMPTION', false],
+    ['Cheapest test', 'CHEAPEST TEST', false],
+  ];
+  let html = '<h3>' + escHtml(title) + '</h3>';
+  let any = false;
+  fields.forEach(([label, key, isSignal]) => {
+    const re = new RegExp(key + '\\s*[:\\-]\\s*([\\s\\S]*?)' + stop, 'i');
+    const m = block.match(re);
+    if (m && m[1].trim()) {
+      any = true;
+      html += '<div class="field' + (isSignal ? ' signal' : '') + '">' +
+              '<span class="field-label">' + label + '</span>' +
+              escHtml(m[1].trim()) + '</div>';
+    }
+  });
+  if (!any) {
+    const rest = block.replace(/^IDEA\s*\d+\s*[:\-]\s*.+/i, '').trim();
+    html += '<div class="field">' + escHtml(rest) + '</div>';
+  }
+  card.innerHTML = html;
+  return card;
+}
+
+function renderIdeas(raw) {
+  const wrap = document.getElementById('idea-cards');
+  wrap.innerHTML = '';
+  const blocks = raw.split(/\n(?=IDEA\s*\d+\s*[:\-])/i).map(s => s.trim()).filter(Boolean);
+  const ideaBlocks = blocks.filter(b => /^IDEA\s*\d+/i.test(b));
+  if (ideaBlocks.length === 0) {
+    const c = document.createElement('div');
+    c.className = 'idea-card';
+    c.innerHTML = '<div class="field">' + escHtml(raw) + '</div>';
+    wrap.appendChild(c);
+  } else {
+    ideaBlocks.forEach(b => wrap.appendChild(buildIdeaCard(b)));
+  }
+  document.getElementById('ideas-section').style.display = 'block';
+}
+
+function handleDEvent(ev) {
+  switch (ev.event) {
+    case 'stage': {
+      const n = ev.stage;
+      if (ev.status === 'start') {
+        setDStage(n, 'active');
+        if (n === 1 && ev.models) {
+          discoverState.models = ev.models;
+          ev.models.forEach((_, i) => {
+            const letter = String.fromCharCode(65 + i);
+            discoverState.letters.push(letter);
+            dUpsertTab(letter);
+          });
+        }
+      } else if (ev.status === 'done') {
+        setDStage(n, 'done');
+      }
+      break;
+    }
+    case 'stage1_result':
+      dUpsertTab(ev.letter);
+      updateProposal(ev.letter, ev.model, ev.content, ev.error);
+      break;
+    case 'rankings':
+      break;  // ranking is internal here; the top-3 is the deliverable
+    case 'ideas':
+      renderIdeas(ev.content);
+      break;
+    case 'error':
+      showDError(ev.message);
+      break;
+    case 'done':
+      break;
+  }
+}
+
+async function runDiscover() {
+  const constraints = document.getElementById('discover-input').value.trim();
+
+  document.getElementById('discover-error').style.display = 'none';
+  document.getElementById('ideas-section').style.display = 'none';
+  document.getElementById('discover-analyses-section').style.display = 'none';
+  document.getElementById('idea-cards').innerHTML = '';
+  document.getElementById('dtabs').innerHTML = '';
+  document.getElementById('dcards').innerHTML = '';
+  [1, 2, 3].forEach(n => setDStage(n, ''));
+  Object.assign(discoverState, { models: [], letters: [], proposals: {} });
+
+  const btn = document.getElementById('discover-run-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Scouting…';
+
+  try {
+    const resp = await fetch('/discover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ constraints }),
+    });
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        handleDEvent(JSON.parse(line.slice(6)));
+      }
+    }
+  } catch (e) {
+    showDError('Connection error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Find ideas with a payment signal';
+  }
+}
+
 // Submit on Ctrl+Enter
 document.getElementById('idea-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runCouncil();
 });
 document.getElementById('chat-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendChat();
+});
+document.getElementById('discover-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runDiscover();
 });
 </script>
 </body>

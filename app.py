@@ -31,6 +31,12 @@ from prompts import (
     FOLLOWUP_STAGE2_USER_TEMPLATE,
     FOLLOWUP_STAGE3_SYSTEM,
     FOLLOWUP_STAGE3_USER_TEMPLATE,
+    DISCOVER_STAGE1_SYSTEM,
+    DISCOVER_STAGE1_USER_TEMPLATE,
+    DISCOVER_STAGE2_SYSTEM,
+    DISCOVER_STAGE2_USER_TEMPLATE,
+    DISCOVER_STAGE3_SYSTEM,
+    DISCOVER_STAGE3_USER_TEMPLATE,
 )
 
 load_dotenv()
@@ -451,6 +457,140 @@ async def chat(req: ChatRequest):
             return
 
         yield sse("chat_stage", {"stage": 3, "status": "done"})
+        yield sse("done", {})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── Discover mode (the council in reverse) ───────────────────────────────────
+# Same 3-stage method, but the council PROPOSES ideas with a real payment signal
+# instead of validating one. Stage 1: each member proposes 3 ideas. Stage 2:
+# anonymous peer review ranks the sets. Stage 3: chairman picks the top 3 overall.
+
+
+class DiscoverRequest(BaseModel):
+    constraints: str = ""
+
+
+@app.post("/discover")
+async def discover(req: DiscoverRequest):
+    async def stream() -> AsyncGenerator[str, None]:
+        if not OPENROUTER_API_KEY:
+            yield sse("error", {"message": "OPENROUTER_API_KEY not set."})
+            return
+
+        constraints = req.constraints.strip()
+        constraints_for_prompt = constraints or (
+            "(none given — scan broadly for the strongest payment signals)"
+        )
+        letters = [chr(ord("A") + i) for i in range(len(COUNCIL_MODELS))]
+
+        # ── Stage 1 — each member proposes ideas ─────────────────────────────
+        yield sse("stage", {"stage": 1, "status": "start", "models": COUNCIL_MODELS})
+
+        stage1_results: dict[str, str | None] = {}
+
+        async with httpx.AsyncClient() as client:
+
+            async def propose(model: str, letter: str):
+                try:
+                    content = await call_model(
+                        client,
+                        model,
+                        DISCOVER_STAGE1_SYSTEM,
+                        DISCOVER_STAGE1_USER_TEMPLATE.format(constraints=constraints_for_prompt),
+                        temperature=0.8,
+                    )
+                    stage1_results[letter] = content
+                    return letter, model, content, None
+                except Exception as exc:
+                    stage1_results[letter] = None
+                    return letter, model, None, str(exc)
+
+            tasks = [propose(m, l) for m, l in zip(COUNCIL_MODELS, letters)]
+            for coro in asyncio.as_completed(tasks):
+                letter, model, content, error = await coro
+                if error:
+                    yield sse("stage1_result", {"letter": letter, "model": model, "error": error})
+                else:
+                    yield sse("stage1_result", {"letter": letter, "model": model, "content": content})
+
+        valid_letters = [l for l in letters if stage1_results.get(l)]
+        if len(valid_letters) < 2:
+            yield sse("error", {"message": "Too few models responded (need ≥ 2)."})
+            return
+        yield sse("stage", {"stage": 1, "status": "done"})
+
+        # ── Stage 2 — anonymous peer review of the idea sets ─────────────────
+        yield sse("stage", {"stage": 2, "status": "start"})
+
+        anon_block = "\n\n---\n\n".join(
+            f"Response {l}:\n{stage1_results[l]}" for l in valid_letters
+        )
+        stage2_results: list[dict[str, int]] = []
+
+        async with httpx.AsyncClient() as client:
+
+            async def review(model: str, letter: str):
+                try:
+                    content = await call_model(
+                        client,
+                        model,
+                        DISCOVER_STAGE2_SYSTEM,
+                        DISCOVER_STAGE2_USER_TEMPLATE.format(
+                            constraints=constraints_for_prompt, proposals=anon_block
+                        ),
+                        temperature=0.4,
+                    )
+                    return parse_ranking(content, valid_letters), None
+                except Exception as exc:
+                    return {}, str(exc)
+
+            tasks = [
+                review(m, l)
+                for m, l in zip(COUNCIL_MODELS, letters)
+                if stage1_results.get(l)
+            ]
+            for coro in asyncio.as_completed(tasks):
+                ranking, error = await coro
+                if not error and ranking:
+                    stage2_results.append(ranking)
+
+        avg_ranks = (
+            aggregate_rankings(stage2_results, valid_letters)
+            if stage2_results
+            else {l: 1.0 for l in valid_letters}
+        )
+        yield sse("rankings", {"avg_ranks": avg_ranks, "letters": valid_letters})
+        yield sse("stage", {"stage": 2, "status": "done"})
+
+        # ── Stage 3 — chairman picks the top 3 ───────────────────────────────
+        yield sse("stage", {"stage": 3, "status": "start", "chairman": CHAIRMAN_MODEL})
+
+        sorted_letters = sorted(valid_letters, key=lambda l: avg_ranks.get(l, 999))
+        proposals_with_ranks = "\n\n---\n\n".join(
+            f"Response {l} (avg rank: {avg_ranks.get(l, 999.0):.1f}):\n{stage1_results[l]}"
+            for l in sorted_letters
+        )
+
+        try:
+            async with httpx.AsyncClient() as client:
+                ideas = await call_model(
+                    client,
+                    CHAIRMAN_MODEL,
+                    DISCOVER_STAGE3_SYSTEM,
+                    DISCOVER_STAGE3_USER_TEMPLATE.format(
+                        constraints=constraints_for_prompt,
+                        proposals_with_ranks=proposals_with_ranks,
+                    ),
+                    temperature=0.4,
+                )
+            yield sse("ideas", {"content": ideas})
+        except Exception as exc:
+            yield sse("error", {"message": f"Chairman failed: {exc}"})
+            return
+
+        yield sse("stage", {"stage": 3, "status": "done"})
         yield sse("done", {})
 
     return StreamingResponse(stream(), media_type="text/event-stream")

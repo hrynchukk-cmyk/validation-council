@@ -56,6 +56,24 @@ Calls per follow-up: `(council size × 2) + 1`, same as a full run. The session
 stays stateless — the browser holds the idea, verdict, and conversation history
 and sends them back with each question, so refreshing the page clears it.
 
+## Discover mode (the council in reverse)
+
+The **💡 Discover ideas** tab runs the same council backwards: instead of judging
+your idea, it proposes the **top 3 ideas with a real signal of willingness to
+pay** — problems people or companies already spend money on (competitors,
+agencies, manual workarounds, lost revenue), not hype.
+
+- **Stage 1** — each model proposes 3 ideas, each requiring a named payer and
+  concrete evidence of existing spend.
+- **Stage 2** — anonymous peer review ranks the idea sets by strength of payment
+  signal.
+- **Stage 3** — the chairman picks and sharpens the top 3 overall, each with:
+  payer & payment signal, why now, riskiest assumption, and the cheapest test.
+
+Give optional constraints (market, B2B/B2C, your skills, a domain) or leave it
+empty to scan broadly. Calls per run: `(council size × 2) + 1`. Expand
+*Council proposals* to see each model's raw ideas before synthesis.
+
 ## Configuration
 
 All config lives in `.env` — no code changes needed to swap models:
