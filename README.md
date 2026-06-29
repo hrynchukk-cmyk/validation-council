@@ -80,6 +80,33 @@ the same answer → peer review → chairman synthesis runs again — staying an
 and tracing every recommendation back to who pays. Calls per follow-up:
 `(council size × 2) + 1`.
 
+## Audit mode (pre-contract requirements risk auditor)
+
+The **🔍 Requirements audit** tab is for software agencies pricing **fixed-price**
+projects. A PM pastes the client's requirements (and optional delivery context —
+domain, stack, team, deadline, budget) and the council audits them for delivery
+risk **before** a number is committed — flagging ambiguities and incompleteness
+that cause fixed-price disputes.
+
+- **Stage 1** — each model audits the requirements as a senior architect /
+  delivery lead: domain read, ambiguities, missing info, implementation risks,
+  a **ranged effort estimate** (with confidence and stated assumptions), and the
+  questions to ask the client before pricing.
+- **Stage 2** — anonymous peer review ranks the audits by how well they surface
+  real risk and how realistic the estimates are.
+- **Stage 3** — the chairman delivers one consolidated report with a **pricing
+  risk level** (LOW / MEDIUM / HIGH / CRITICAL), top ambiguities, key risks, a
+  consolidated estimate range, must-ask questions, and a recommendation
+  (price now / clarify first / re-scope / walk away).
+
+**Work-with-the-council chat.** After the report you can keep talking to the
+council to clarify a risk, **re-estimate a module** given new information, draft
+client-facing questions, and — importantly — ask it to **write precise,
+implementation-ready development prompts** for a feature (goal, scope, data model,
+API, business rules, acceptance criteria, edge cases, non-functional needs),
+ready to hand to an engineer or an AI coding tool. Every council answer has a
+**Copy** button. Calls per run / per follow-up: `(council size × 2) + 1`.
+
 ## Configuration
 
 All config lives in `.env` — no code changes needed to swap models:

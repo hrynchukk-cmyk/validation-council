@@ -41,6 +41,16 @@ from prompts import (
     DISCOVER_FOLLOWUP_STAGE1_USER_TEMPLATE,
     DISCOVER_FOLLOWUP_STAGE3_SYSTEM,
     DISCOVER_FOLLOWUP_STAGE3_USER_TEMPLATE,
+    AUDIT_STAGE1_SYSTEM,
+    AUDIT_STAGE1_USER_TEMPLATE,
+    AUDIT_STAGE2_SYSTEM,
+    AUDIT_STAGE2_USER_TEMPLATE,
+    AUDIT_STAGE3_SYSTEM,
+    AUDIT_STAGE3_USER_TEMPLATE,
+    AUDIT_FOLLOWUP_STAGE1_SYSTEM,
+    AUDIT_FOLLOWUP_STAGE1_USER_TEMPLATE,
+    AUDIT_FOLLOWUP_STAGE3_SYSTEM,
+    AUDIT_FOLLOWUP_STAGE3_USER_TEMPLATE,
 )
 
 load_dotenv()
@@ -523,10 +533,123 @@ async def discover_chat(req: DiscoverChatRequest):
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+# ── Shared council pipeline (generation / audit style) ───────────────────────
+# Each member receives the SAME stage-1 prompt → anonymous peer review ranks the
+# results → chairman synthesizes one document, emitted as `final_event`. Used by
+# both Discover and Audit modes.
+
+
+async def _council_pipeline(
+    stage1_system: str,
+    stage1_user: str,
+    stage2_system: str,
+    make_stage2_user,                 # (anon_block: str) -> str
+    stage3_system: str,
+    make_stage3_user,                 # (ranked_block: str) -> str
+    final_event: str,
+    stage1_temperature: float = 0.7,
+) -> AsyncGenerator[str, None]:
+    if not OPENROUTER_API_KEY:
+        yield sse("error", {"message": "OPENROUTER_API_KEY not set."})
+        return
+
+    letters = [chr(ord("A") + i) for i in range(len(COUNCIL_MODELS))]
+
+    # ── Stage 1 ──────────────────────────────────────────────────────────────
+    yield sse("stage", {"stage": 1, "status": "start", "models": COUNCIL_MODELS})
+
+    stage1_results: dict[str, str | None] = {}
+
+    async with httpx.AsyncClient() as client:
+
+        async def fetch1(model: str, letter: str):
+            try:
+                content = await call_model(
+                    client, model, stage1_system, stage1_user, temperature=stage1_temperature
+                )
+                stage1_results[letter] = content
+                return letter, model, content, None
+            except Exception as exc:
+                stage1_results[letter] = None
+                return letter, model, None, str(exc)
+
+        tasks = [fetch1(m, l) for m, l in zip(COUNCIL_MODELS, letters)]
+        for coro in asyncio.as_completed(tasks):
+            letter, model, content, error = await coro
+            if error:
+                yield sse("stage1_result", {"letter": letter, "model": model, "error": error})
+            else:
+                yield sse("stage1_result", {"letter": letter, "model": model, "content": content})
+
+    valid_letters = [l for l in letters if stage1_results.get(l)]
+    if len(valid_letters) < 2:
+        yield sse("error", {"message": "Too few models responded (need ≥ 2)."})
+        return
+    yield sse("stage", {"stage": 1, "status": "done"})
+
+    # ── Stage 2 — anonymous peer review ──────────────────────────────────────
+    yield sse("stage", {"stage": 2, "status": "start"})
+
+    anon_block = "\n\n---\n\n".join(
+        f"Response {l}:\n{stage1_results[l]}" for l in valid_letters
+    )
+    stage2_results: list[dict[str, int]] = []
+
+    async with httpx.AsyncClient() as client:
+
+        async def review(model: str, letter: str):
+            try:
+                content = await call_model(
+                    client, model, stage2_system, make_stage2_user(anon_block), temperature=0.4
+                )
+                return parse_ranking(content, valid_letters), None
+            except Exception as exc:
+                return {}, str(exc)
+
+        tasks = [
+            review(m, l)
+            for m, l in zip(COUNCIL_MODELS, letters)
+            if stage1_results.get(l)
+        ]
+        for coro in asyncio.as_completed(tasks):
+            ranking, error = await coro
+            if not error and ranking:
+                stage2_results.append(ranking)
+
+    avg_ranks = (
+        aggregate_rankings(stage2_results, valid_letters)
+        if stage2_results
+        else {l: 1.0 for l in valid_letters}
+    )
+    yield sse("rankings", {"avg_ranks": avg_ranks, "letters": valid_letters})
+    yield sse("stage", {"stage": 2, "status": "done"})
+
+    # ── Stage 3 — chairman synthesis ─────────────────────────────────────────
+    yield sse("stage", {"stage": 3, "status": "start", "chairman": CHAIRMAN_MODEL})
+
+    sorted_letters = sorted(valid_letters, key=lambda l: avg_ranks.get(l, 999))
+    ranked_block = "\n\n---\n\n".join(
+        f"Response {l} (avg rank: {avg_ranks.get(l, 999.0):.1f}):\n{stage1_results[l]}"
+        for l in sorted_letters
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            final = await call_model(
+                client, CHAIRMAN_MODEL, stage3_system, make_stage3_user(ranked_block),
+                temperature=0.4,
+            )
+        yield sse(final_event, {"content": final})
+    except Exception as exc:
+        yield sse("error", {"message": f"Chairman failed: {exc}"})
+        return
+
+    yield sse("stage", {"stage": 3, "status": "done"})
+    yield sse("done", {})
+
+
 # ── Discover mode (the council in reverse) ───────────────────────────────────
-# Same 3-stage method, but the council PROPOSES ideas with a real payment signal
-# instead of validating one. Stage 1: each member proposes 3 ideas. Stage 2:
-# anonymous peer review ranks the sets. Stage 3: chairman picks the top 3 overall.
+# The council PROPOSES ideas with a real payment signal instead of validating one.
 
 
 class DiscoverRequest(BaseModel):
@@ -535,124 +658,112 @@ class DiscoverRequest(BaseModel):
 
 @app.post("/discover")
 async def discover(req: DiscoverRequest):
+    constraints = req.constraints.strip() or (
+        "(none given — scan broadly for the strongest payment signals)"
+    )
+
     async def stream() -> AsyncGenerator[str, None]:
+        async for ev in _council_pipeline(
+            DISCOVER_STAGE1_SYSTEM,
+            DISCOVER_STAGE1_USER_TEMPLATE.format(constraints=constraints),
+            DISCOVER_STAGE2_SYSTEM,
+            lambda block: DISCOVER_STAGE2_USER_TEMPLATE.format(constraints=constraints, proposals=block),
+            DISCOVER_STAGE3_SYSTEM,
+            lambda ranked: DISCOVER_STAGE3_USER_TEMPLATE.format(constraints=constraints, proposals_with_ranks=ranked),
+            "ideas",
+            stage1_temperature=0.8,
+        ):
+            yield ev
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── Audit mode (pre-contract requirements risk auditor) ──────────────────────
+# The council audits a client's requirements for fixed-price delivery risk:
+# ambiguities, missing info, implementation risks, and ranged effort estimates.
+
+
+class AuditRequest(BaseModel):
+    requirements: str
+    context: str = ""
+
+
+@app.post("/audit")
+async def audit(req: AuditRequest):
+    requirements = req.requirements.strip()
+    context = req.context.strip() or "(none provided)"
+
+    async def stream() -> AsyncGenerator[str, None]:
+        if not requirements:
+            yield sse("error", {"message": "No requirements provided."})
+            return
+        async for ev in _council_pipeline(
+            AUDIT_STAGE1_SYSTEM,
+            AUDIT_STAGE1_USER_TEMPLATE.format(requirements=requirements, context=context),
+            AUDIT_STAGE2_SYSTEM,
+            lambda block: AUDIT_STAGE2_USER_TEMPLATE.format(requirements=requirements, audits=block),
+            AUDIT_STAGE3_SYSTEM,
+            lambda ranked: AUDIT_STAGE3_USER_TEMPLATE.format(
+                requirements=requirements, context=context, audits_with_ranks=ranked
+            ),
+            "audit",
+            stage1_temperature=0.5,
+        ):
+            yield ev
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── Audit follow-up chat (incl. generating development prompts) ───────────────
+
+
+class AuditChatRequest(BaseModel):
+    requirements: str = ""
+    context: str = ""
+    report: str = ""
+    audits: list[ChatAnalysis] = []
+    history: list[ChatTurn] = []
+    question: str
+
+
+@app.post("/audit_chat")
+async def audit_chat(req: AuditChatRequest):
+    async def stream() -> AsyncGenerator[str, None]:
+        question = req.question.strip()
+        if not question:
+            yield sse("error", {"message": "No question provided."})
+            return
         if not OPENROUTER_API_KEY:
             yield sse("error", {"message": "OPENROUTER_API_KEY not set."})
             return
 
-        constraints = req.constraints.strip()
-        constraints_for_prompt = constraints or (
-            "(none given — scan broadly for the strongest payment signals)"
-        )
-        letters = [chr(ord("A") + i) for i in range(len(COUNCIL_MODELS))]
-
-        # ── Stage 1 — each member proposes ideas ─────────────────────────────
-        yield sse("stage", {"stage": 1, "status": "start", "models": COUNCIL_MODELS})
-
-        stage1_results: dict[str, str | None] = {}
-
-        async with httpx.AsyncClient() as client:
-
-            async def propose(model: str, letter: str):
-                try:
-                    content = await call_model(
-                        client,
-                        model,
-                        DISCOVER_STAGE1_SYSTEM,
-                        DISCOVER_STAGE1_USER_TEMPLATE.format(constraints=constraints_for_prompt),
-                        temperature=0.8,
-                    )
-                    stage1_results[letter] = content
-                    return letter, model, content, None
-                except Exception as exc:
-                    stage1_results[letter] = None
-                    return letter, model, None, str(exc)
-
-            tasks = [propose(m, l) for m, l in zip(COUNCIL_MODELS, letters)]
-            for coro in asyncio.as_completed(tasks):
-                letter, model, content, error = await coro
-                if error:
-                    yield sse("stage1_result", {"letter": letter, "model": model, "error": error})
-                else:
-                    yield sse("stage1_result", {"letter": letter, "model": model, "content": content})
-
-        valid_letters = [l for l in letters if stage1_results.get(l)]
-        if len(valid_letters) < 2:
-            yield sse("error", {"message": "Too few models responded (need ≥ 2)."})
-            return
-        yield sse("stage", {"stage": 1, "status": "done"})
-
-        # ── Stage 2 — anonymous peer review of the idea sets ─────────────────
-        yield sse("stage", {"stage": 2, "status": "start"})
-
-        anon_block = "\n\n---\n\n".join(
-            f"Response {l}:\n{stage1_results[l]}" for l in valid_letters
-        )
-        stage2_results: list[dict[str, int]] = []
-
-        async with httpx.AsyncClient() as client:
-
-            async def review(model: str, letter: str):
-                try:
-                    content = await call_model(
-                        client,
-                        model,
-                        DISCOVER_STAGE2_SYSTEM,
-                        DISCOVER_STAGE2_USER_TEMPLATE.format(
-                            constraints=constraints_for_prompt, proposals=anon_block
-                        ),
-                        temperature=0.4,
-                    )
-                    return parse_ranking(content, valid_letters), None
-                except Exception as exc:
-                    return {}, str(exc)
-
-            tasks = [
-                review(m, l)
-                for m, l in zip(COUNCIL_MODELS, letters)
-                if stage1_results.get(l)
-            ]
-            for coro in asyncio.as_completed(tasks):
-                ranking, error = await coro
-                if not error and ranking:
-                    stage2_results.append(ranking)
-
-        avg_ranks = (
-            aggregate_rankings(stage2_results, valid_letters)
-            if stage2_results
-            else {l: 1.0 for l in valid_letters}
-        )
-        yield sse("rankings", {"avg_ranks": avg_ranks, "letters": valid_letters})
-        yield sse("stage", {"stage": 2, "status": "done"})
-
-        # ── Stage 3 — chairman picks the top 3 ───────────────────────────────
-        yield sse("stage", {"stage": 3, "status": "start", "chairman": CHAIRMAN_MODEL})
-
-        sorted_letters = sorted(valid_letters, key=lambda l: avg_ranks.get(l, 999))
-        proposals_with_ranks = "\n\n---\n\n".join(
-            f"Response {l} (avg rank: {avg_ranks.get(l, 999.0):.1f}):\n{stage1_results[l]}"
-            for l in sorted_letters
-        )
-
-        try:
-            async with httpx.AsyncClient() as client:
-                ideas = await call_model(
-                    client,
-                    CHAIRMAN_MODEL,
-                    DISCOVER_STAGE3_SYSTEM,
-                    DISCOVER_STAGE3_USER_TEMPLATE.format(
-                        constraints=constraints_for_prompt,
-                        proposals_with_ranks=proposals_with_ranks,
-                    ),
-                    temperature=0.4,
-                )
-            yield sse("ideas", {"content": ideas})
-        except Exception as exc:
-            yield sse("error", {"message": f"Chairman failed: {exc}"})
+        participants = [(a.letter, a.model) for a in req.audits if a.content and a.model]
+        if not participants:
+            yield sse("error", {"message": "No council context provided."})
             return
 
-        yield sse("stage", {"stage": 3, "status": "done"})
-        yield sse("done", {})
+        history_str = format_history(req.history)
+        requirements = req.requirements or "(requirements unavailable)"
+        context = req.context.strip() or "(none provided)"
+        report = req.report or "(audit unavailable)"
+        stage1_user = AUDIT_FOLLOWUP_STAGE1_USER_TEMPLATE.format(
+            requirements=requirements, context=context, report=report,
+            history=history_str, question=question,
+        )
+
+        async for ev in _followup_pipeline(
+            participants,
+            AUDIT_FOLLOWUP_STAGE1_SYSTEM,
+            stage1_user,
+            FOLLOWUP_STAGE2_SYSTEM,
+            lambda block: FOLLOWUP_STAGE2_USER_TEMPLATE.format(question=question, analyses=block),
+            AUDIT_FOLLOWUP_STAGE3_SYSTEM,
+            lambda awr: AUDIT_FOLLOWUP_STAGE3_USER_TEMPLATE.format(
+                requirements=requirements, context=context, report=report,
+                history=history_str, question=question, analyses_with_ranks=awr,
+            ),
+        ):
+            yield ev
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 

@@ -212,7 +212,7 @@
   }
 
   /* Follow-up chat */
-  #chat-section, #discover-chat-section { display: none; margin-top: 2rem; }
+  #chat-section, #discover-chat-section, #audit-chat-section { display: none; margin-top: 2rem; }
   .chat-messages { display: flex; flex-direction: column; gap: .75rem; margin-bottom: 1rem; }
   .chat-msg {
     padding: .75rem 1rem;
@@ -295,6 +295,38 @@
     margin-bottom: .1rem;
   }
   .idea-card .field.signal .field-label { color: var(--go); }
+
+  /* Audit — consolidated report (mirrors the verdict stamp) */
+  #audit-stamp {
+    display: none;
+    border-radius: .75rem;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+    border: 2px solid;
+  }
+  #audit-stamp .risk-line { font-size: 1.35rem; font-weight: 800; letter-spacing: .04em; margin-bottom: .4rem; }
+  #audit-stamp .confidence { font-size: .85rem; color: var(--muted); margin-bottom: .75rem; }
+  #audit-stamp .one-liner { font-size: .95rem; }
+  #audit-stamp .report-body { color: var(--text); font-size: .875rem; margin-top: .75rem; white-space: pre-wrap; line-height: 1.6; }
+  #audit-stamp.LOW  { background: #052e16; border-color: var(--go);    color: var(--go); }
+  #audit-stamp.MED  { background: #1a2e05; border-color: var(--cgo);   color: var(--cgo); }
+  #audit-stamp.HIGH { background: #2d1a05; border-color: var(--pivot); color: var(--pivot); }
+  #audit-stamp.CRIT { background: #2d0505; border-color: var(--kill);  color: var(--kill); }
+  #audit-analyses-section { display: none; margin-bottom: 1.5rem; }
+
+  /* Copy button on council chat answers (handy for generated dev prompts) */
+  .chat-msg .copy-btn {
+    float: right;
+    margin-left: .5rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: .3rem;
+    font-size: .7rem;
+    padding: .12rem .45rem;
+    cursor: pointer;
+  }
+  .chat-msg .copy-btn:hover { border-color: var(--accent); color: var(--text); }
 </style>
 </head>
 <body>
@@ -305,6 +337,7 @@
   <div class="mode-tabs" role="tablist">
     <button class="mode-tab active" id="mode-validate" role="tab" onclick="switchMode('validate')">⚖️ Validate an idea</button>
     <button class="mode-tab" id="mode-discover" role="tab" onclick="switchMode('discover')">💡 Discover ideas</button>
+    <button class="mode-tab" id="mode-audit" role="tab" onclick="switchMode('audit')">🔍 Requirements audit</button>
   </div>
 
   <div id="view-validate">
@@ -412,6 +445,57 @@
       </div>
     </div>
   </div><!-- /view-discover -->
+
+  <div id="view-audit" style="display:none;">
+    <p class="subtitle">Pre-contract requirements risk auditor for <em>fixed-price</em> software projects. Paste the client's requirements and the council flags ambiguities, missing info, implementation risks, and ranged effort estimates — <em>before</em> you price the proposal. In the chat you can re-estimate, draft client questions, or ask the council to write precise development prompts.</p>
+
+    <div class="input-box">
+      <textarea id="audit-input" style="min-height:200px;" placeholder="Paste the client's requirements / scope / documentation here. The more you paste, the sharper the audit." aria-label="Client requirements"></textarea>
+      <textarea id="audit-context" style="min-height:64px; margin-top:.5rem; border-top:1px solid var(--border); padding-top:.5rem;" placeholder="Optional delivery context — domain, tech stack, team size, deadline, budget, constraints." aria-label="Delivery context"></textarea>
+      <div style="display:flex; justify-content:flex-end; margin-top:.5rem;">
+        <button class="btn" id="audit-run-btn" onclick="runAudit()">Audit the requirements</button>
+      </div>
+    </div>
+
+    <div id="audit-error" class="error-msg" role="alert"></div>
+
+    <div class="timeline" id="audit-timeline" aria-live="polite">
+      <div class="stage-chip" id="achip1">
+        <div class="stage-label">Stage 1</div>
+        Independent audit
+      </div>
+      <div class="stage-chip" id="achip2">
+        <div class="stage-label">Stage 2</div>
+        Anonymous peer review
+      </div>
+      <div class="stage-chip" id="achip3">
+        <div class="stage-label">Stage 3</div>
+        Consolidated report
+      </div>
+    </div>
+
+    <div id="audit-stamp" role="region" aria-label="Audit report">
+      <div class="risk-line" id="audit-decision"></div>
+      <div class="confidence" id="audit-confidence"></div>
+      <div class="one-liner" id="audit-one-liner"></div>
+      <div class="report-body" id="audit-body"></div>
+    </div>
+
+    <div id="audit-analyses-section">
+      <div class="section-title">Council audits (before consolidation)</div>
+      <div class="tabs" id="atabs" role="tablist"></div>
+      <div id="acards"></div>
+    </div>
+
+    <div id="audit-chat-section">
+      <div class="section-title">Work with the council</div>
+      <div class="chat-messages" id="audit-chat-messages" aria-live="polite"></div>
+      <div class="chat-input-box">
+        <textarea id="audit-chat-input" placeholder="Ask to clarify a risk, re-estimate a module, draft client questions, or: &quot;Write a development prompt for &lt;feature&gt;.&quot;" aria-label="Message to the council"></textarea>
+        <button class="btn" id="audit-chat-send-btn" onclick="sendAuditChat()">Send</button>
+      </div>
+    </div>
+  </div><!-- /view-audit -->
 </div>
 
 <script>
@@ -660,7 +744,8 @@ function setChatStatus(bubble, text) {
 }
 
 function renderCouncilAnswer(bubble, answer, members) {
-  let html = '<div class="answer-text">' + escHtml(answer) + '</div>';
+  let html = '<button class="copy-btn" type="button">Copy</button>' +
+             '<div class="answer-text">' + escHtml(answer) + '</div>';
   const letters = Object.keys(members).sort();
   if (letters.length) {
     let inner = '';
@@ -679,10 +764,19 @@ function renderCouncilAnswer(bubble, answer, members) {
             letters.length + ')</summary>' + inner + '</details>';
   }
   bubble.innerHTML = html;
+  const copyBtn = bubble.querySelector('.copy-btn');
+  if (copyBtn) {
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(answer).then(() => {
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+      }).catch(() => {});
+    };
+  }
   bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
 }
 
-// Shared streaming loop for both follow-up chats. Renders user + council bubbles
+// Shared streaming loop for the follow-up chats. Renders user + council bubbles
 // in `containerId`, streams the chat_* SSE events, and pushes the Q/A to history.
 async function streamCouncilChat({ endpoint, payload, containerId, history, inputEl, sendBtn }) {
   const question = payload.question;
@@ -813,11 +907,11 @@ async function sendDiscoverChat() {
 // ── Mode switching ───────────────────────────────────────────────────────────
 
 function switchMode(mode) {
-  const isValidate = mode === 'validate';
-  document.getElementById('view-validate').style.display = isValidate ? 'block' : 'none';
-  document.getElementById('view-discover').style.display = isValidate ? 'none' : 'block';
-  document.getElementById('mode-validate').classList.toggle('active', isValidate);
-  document.getElementById('mode-discover').classList.toggle('active', !isValidate);
+  const modes = ['validate', 'discover', 'audit'];
+  modes.forEach(m => {
+    document.getElementById('view-' + m).style.display = (m === mode) ? 'block' : 'none';
+    document.getElementById('mode-' + m).classList.toggle('active', m === mode);
+  });
 }
 
 // ── Discover mode (council in reverse) ───────────────────────────────────────
@@ -1024,6 +1118,217 @@ async function runDiscover() {
   }
 }
 
+// ── Audit mode (pre-contract requirements risk auditor) ──────────────────────
+
+const auditState = {
+  models: [], letters: [], audits: {},
+  requirements: '', context: '', reportRaw: '', chatHistory: [],
+};
+
+function setAStage(n, status) {
+  const chip = document.getElementById('achip' + n);
+  if (chip) chip.className = 'stage-chip ' + status;
+}
+
+function showAError(msg) {
+  const el = document.getElementById('audit-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+function aUpsertTab(letter) {
+  const tabs = document.getElementById('atabs');
+  if (document.getElementById('atab-' + letter)) return;
+  const tab = document.createElement('button');
+  tab.id = 'atab-' + letter;
+  tab.className = 'tab';
+  tab.role = 'tab';
+  tab.onclick = () => aActivateTab(letter);
+  tab.textContent = 'Response ' + letter + ' …';
+  tabs.appendChild(tab);
+
+  const card = document.createElement('div');
+  card.id = 'acard-' + letter;
+  card.className = 'card';
+  card.innerHTML = '<span class="spinner"></span> Waiting<span class="loading-dot"></span>';
+  document.getElementById('acards').appendChild(card);
+
+  document.getElementById('audit-analyses-section').style.display = 'block';
+  if (!document.querySelector('#atabs .tab.active')) aActivateTab(letter);
+}
+
+function aActivateTab(letter) {
+  document.querySelectorAll('#atabs .tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('#acards .card').forEach(c => c.classList.remove('active'));
+  const tab = document.getElementById('atab-' + letter);
+  const card = document.getElementById('acard-' + letter);
+  if (tab) tab.classList.add('active');
+  if (card) card.classList.add('active');
+}
+
+function updateAudit(letter, model, content, error) {
+  auditState.audits[letter] = { model, content, error };
+  const tab = document.getElementById('atab-' + letter);
+  const card = document.getElementById('acard-' + letter);
+  if (!tab || !card) return;
+  const shortModel = (model || '').split('/').pop();
+  if (error) {
+    tab.textContent = 'Response ' + letter + ' ✗';
+    tab.classList.add('error');
+    card.innerHTML = '<p style="color:var(--kill)">Error: ' + escHtml(error) + '</p>';
+  } else {
+    tab.textContent = 'Response ' + letter + ' — ' + shortModel;
+    card.innerHTML = '<div class="analysis-text">' + escHtml(content) + '</div>';
+  }
+}
+
+function renderAuditReport(raw) {
+  const m = raw.match(/PRICING RISK:\s*(LOW|MEDIUM|HIGH|CRITICAL)[^%]*?(\d+)\s*%/i);
+  const level = m ? m[1].toUpperCase() : 'UNKNOWN';
+  const conf = m ? m[2] : '?';
+  const clsMap = { LOW: 'LOW', MEDIUM: 'MED', HIGH: 'HIGH', CRITICAL: 'CRIT' };
+  const cls = clsMap[level] || '';
+
+  const oneM = raw.match(/ONE-LINE:\s*(.+)/i);
+  const oneLiner = oneM ? oneM[1].trim() : '';
+
+  const bodyStart = raw.indexOf('TOP AMBIGUITIES');
+  const body = bodyStart >= 0
+    ? raw.slice(bodyStart)
+    : raw.replace(/PRICING RISK:.*\n?/i, '').replace(/ONE-LINE:.*\n?/i, '').trim();
+
+  const stamp = document.getElementById('audit-stamp');
+  stamp.className = cls;
+  stamp.style.display = 'block';
+  document.getElementById('audit-decision').textContent = 'PRICING RISK: ' + level;
+  document.getElementById('audit-confidence').textContent = 'Confidence: ' + conf + '%';
+  document.getElementById('audit-one-liner').textContent = oneLiner;
+  document.getElementById('audit-body').textContent = body;
+}
+
+function handleAEvent(ev) {
+  switch (ev.event) {
+    case 'stage': {
+      const n = ev.stage;
+      if (ev.status === 'start') {
+        setAStage(n, 'active');
+        if (n === 1 && ev.models) {
+          auditState.models = ev.models;
+          ev.models.forEach((_, i) => {
+            const letter = String.fromCharCode(65 + i);
+            auditState.letters.push(letter);
+            aUpsertTab(letter);
+          });
+        }
+      } else if (ev.status === 'done') {
+        setAStage(n, 'done');
+      }
+      break;
+    }
+    case 'stage1_result':
+      aUpsertTab(ev.letter);
+      updateAudit(ev.letter, ev.model, ev.content, ev.error);
+      break;
+    case 'rankings':
+      break;  // ranking is internal; the consolidated report is the deliverable
+    case 'audit':
+      auditState.reportRaw = ev.content;
+      renderAuditReport(ev.content);
+      break;
+    case 'error':
+      showAError(ev.message);
+      break;
+    case 'done':
+      if (auditState.reportRaw) {
+        document.getElementById('audit-chat-section').style.display = 'block';
+      }
+      break;
+  }
+}
+
+async function runAudit() {
+  const requirements = document.getElementById('audit-input').value.trim();
+  const context = document.getElementById('audit-context').value.trim();
+  if (!requirements) { showAError('Please paste the client requirements first.'); return; }
+
+  document.getElementById('audit-error').style.display = 'none';
+  document.getElementById('audit-stamp').style.display = 'none';
+  document.getElementById('audit-analyses-section').style.display = 'none';
+  document.getElementById('atabs').innerHTML = '';
+  document.getElementById('acards').innerHTML = '';
+  document.getElementById('audit-chat-section').style.display = 'none';
+  document.getElementById('audit-chat-messages').innerHTML = '';
+  [1, 2, 3].forEach(n => setAStage(n, ''));
+  Object.assign(auditState, {
+    models: [], letters: [], audits: {},
+    requirements, context, reportRaw: '', chatHistory: [],
+  });
+
+  const btn = document.getElementById('audit-run-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Auditing…';
+
+  try {
+    const resp = await fetch('/audit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requirements, context }),
+    });
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        handleAEvent(JSON.parse(line.slice(6)));
+      }
+    }
+  } catch (e) {
+    showAError('Connection error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Audit the requirements';
+  }
+}
+
+async function sendAuditChat() {
+  const input = document.getElementById('audit-chat-input');
+  const sendBtn = document.getElementById('audit-chat-send-btn');
+  const question = input.value.trim();
+  if (!question) return;
+
+  const audits = auditState.letters
+    .filter(l => auditState.audits[l] && auditState.audits[l].content && !auditState.audits[l].error)
+    .map(l => ({ letter: l, model: auditState.audits[l].model, content: auditState.audits[l].content }));
+  if (audits.length === 0) {
+    appendChatMsg('council', '<span style="color:var(--kill)">No council context available — run an audit first.</span>', 'audit-chat-messages');
+    return;
+  }
+
+  await streamCouncilChat({
+    endpoint: '/audit_chat',
+    payload: {
+      requirements: auditState.requirements,
+      context: auditState.context,
+      report: auditState.reportRaw,
+      audits,
+      history: auditState.chatHistory,
+      question,
+    },
+    containerId: 'audit-chat-messages',
+    history: auditState.chatHistory,
+    inputEl: input,
+    sendBtn,
+  });
+}
+
 // Submit on Ctrl+Enter
 document.getElementById('idea-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runCouncil();
@@ -1036,6 +1341,15 @@ document.getElementById('discover-input').addEventListener('keydown', e => {
 });
 document.getElementById('discover-chat-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendDiscoverChat();
+});
+document.getElementById('audit-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runAudit();
+});
+document.getElementById('audit-context').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runAudit();
+});
+document.getElementById('audit-chat-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendAuditChat();
 });
 </script>
 </body>
