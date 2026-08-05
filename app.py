@@ -33,6 +33,8 @@ from prompts import (
     FOLLOWUP_STAGE3_USER_TEMPLATE,
     DISCOVER_STAGE1_SYSTEM,
     DISCOVER_STAGE1_USER_TEMPLATE,
+    DISCOVER_REDTEAM_SYSTEM,
+    DISCOVER_REDTEAM_USER_TEMPLATE,
     DISCOVER_STAGE2_SYSTEM,
     DISCOVER_STAGE2_USER_TEMPLATE,
     DISCOVER_STAGE3_SYSTEM,
@@ -488,6 +490,7 @@ async def chat(req: ChatRequest):
 class DiscoverChatRequest(BaseModel):
     constraints: str = ""
     ideas: str = ""
+    redteam: str = ""
     proposals: list[ChatAnalysis] = []
     history: list[ChatTurn] = []
     question: str
@@ -512,8 +515,10 @@ async def discover_chat(req: DiscoverChatRequest):
         history_str = format_history(req.history)
         constraints = req.constraints.strip() or "(none given)"
         ideas = req.ideas or "(ideas unavailable)"
+        redteam = req.redteam or "(no red-team findings available)"
         stage1_user = DISCOVER_FOLLOWUP_STAGE1_USER_TEMPLATE.format(
-            constraints=constraints, ideas=ideas, history=history_str, question=question
+            constraints=constraints, ideas=ideas, redteam=redteam,
+            history=history_str, question=question,
         )
 
         async for ev in _followup_pipeline(
@@ -524,7 +529,7 @@ async def discover_chat(req: DiscoverChatRequest):
             lambda block: FOLLOWUP_STAGE2_USER_TEMPLATE.format(question=question, analyses=block),
             DISCOVER_FOLLOWUP_STAGE3_SYSTEM,
             lambda awr: DISCOVER_FOLLOWUP_STAGE3_USER_TEMPLATE.format(
-                constraints=constraints, ideas=ideas, history=history_str,
+                constraints=constraints, ideas=ideas, redteam=redteam, history=history_str,
                 question=question, analyses_with_ranks=awr,
             ),
         ):
@@ -534,26 +539,33 @@ async def discover_chat(req: DiscoverChatRequest):
 
 
 # ── Shared council pipeline (generation / audit style) ───────────────────────
-# Each member receives the SAME stage-1 prompt → anonymous peer review ranks the
-# results → chairman synthesizes one document, emitted as `final_event`. Used by
-# both Discover and Audit modes.
+# Each member receives the SAME stage-1 prompt → optional adversarial red-team
+# pass over the pooled results → anonymous peer review ranks the results →
+# chairman synthesizes one document, emitted as `final_event`. Used by both
+# Discover (with red team) and Audit (without).
 
 
 async def _council_pipeline(
     stage1_system: str,
     stage1_user: str,
     stage2_system: str,
-    make_stage2_user,                 # (anon_block: str) -> str
+    make_stage2_user,                 # (anon_block, redteam_block) -> str
     stage3_system: str,
-    make_stage3_user,                 # (ranked_block: str) -> str
+    make_stage3_user,                 # (ranked_block, redteam_block) -> str
     final_event: str,
     stage1_temperature: float = 0.7,
+    redteam_system: str | None = None,
+    make_redteam_user=None,           # (anon_block) -> str
 ) -> AsyncGenerator[str, None]:
     if not OPENROUTER_API_KEY:
         yield sse("error", {"message": "OPENROUTER_API_KEY not set."})
         return
 
     letters = [chr(ord("A") + i) for i in range(len(COUNCIL_MODELS))]
+    # With a red-team pass the later stages shift down by one.
+    has_redteam = redteam_system is not None and make_redteam_user is not None
+    review_stage = 3 if has_redteam else 2
+    final_stage = 4 if has_redteam else 3
 
     # ── Stage 1 ──────────────────────────────────────────────────────────────
     yield sse("stage", {"stage": 1, "status": "start", "models": COUNCIL_MODELS})
@@ -587,12 +599,54 @@ async def _council_pipeline(
         return
     yield sse("stage", {"stage": 1, "status": "done"})
 
-    # ── Stage 2 — anonymous peer review ──────────────────────────────────────
-    yield sse("stage", {"stage": 2, "status": "start"})
-
     anon_block = "\n\n---\n\n".join(
         f"Response {l}:\n{stage1_results[l]}" for l in valid_letters
     )
+
+    # ── Stage 2 (optional) — adversarial red-team deep dive ──────────────────
+    # Every member attacks the pooled results, trying to kill them. Findings feed
+    # both the peer review and the chairman, so weak ideas cannot slide through.
+    redteam_block = "(no red-team pass was run)"
+    if has_redteam:
+        yield sse("stage", {"stage": 2, "status": "start"})
+
+        redteam_texts: list[str] = []
+
+        async with httpx.AsyncClient() as client:
+
+            async def redteam(model: str, letter: str):
+                try:
+                    content = await call_model(
+                        client, model, redteam_system, make_redteam_user(anon_block),
+                        temperature=0.5,
+                    )
+                    return letter, model, content, None
+                except Exception as exc:
+                    return letter, model, None, str(exc)
+
+            tasks = [
+                redteam(m, l)
+                for m, l in zip(COUNCIL_MODELS, letters)
+                if stage1_results.get(l)
+            ]
+            for coro in asyncio.as_completed(tasks):
+                letter, model, content, error = await coro
+                if error:
+                    yield sse("redteam_result", {"letter": letter, "model": model, "error": error})
+                else:
+                    redteam_texts.append(content)
+                    yield sse("redteam_result", {"letter": letter, "model": model, "content": content})
+
+        if redteam_texts:
+            # Keep reviewers anonymous — number the findings, don't name the models.
+            redteam_block = "\n\n---\n\n".join(
+                f"Red-team review {i}:\n{text}" for i, text in enumerate(redteam_texts, 1)
+            )
+        yield sse("stage", {"stage": 2, "status": "done"})
+
+    # ── Peer review — anonymous ranking ──────────────────────────────────────
+    yield sse("stage", {"stage": review_stage, "status": "start"})
+
     stage2_results: list[dict[str, int]] = []
 
     async with httpx.AsyncClient() as client:
@@ -600,7 +654,8 @@ async def _council_pipeline(
         async def review(model: str, letter: str):
             try:
                 content = await call_model(
-                    client, model, stage2_system, make_stage2_user(anon_block), temperature=0.4
+                    client, model, stage2_system, make_stage2_user(anon_block, redteam_block),
+                    temperature=0.4,
                 )
                 return parse_ranking(content, valid_letters), None
             except Exception as exc:
@@ -622,10 +677,10 @@ async def _council_pipeline(
         else {l: 1.0 for l in valid_letters}
     )
     yield sse("rankings", {"avg_ranks": avg_ranks, "letters": valid_letters})
-    yield sse("stage", {"stage": 2, "status": "done"})
+    yield sse("stage", {"stage": review_stage, "status": "done"})
 
-    # ── Stage 3 — chairman synthesis ─────────────────────────────────────────
-    yield sse("stage", {"stage": 3, "status": "start", "chairman": CHAIRMAN_MODEL})
+    # ── Chairman synthesis ───────────────────────────────────────────────────
+    yield sse("stage", {"stage": final_stage, "status": "start", "chairman": CHAIRMAN_MODEL})
 
     sorted_letters = sorted(valid_letters, key=lambda l: avg_ranks.get(l, 999))
     ranked_block = "\n\n---\n\n".join(
@@ -636,7 +691,7 @@ async def _council_pipeline(
     try:
         async with httpx.AsyncClient() as client:
             final = await call_model(
-                client, CHAIRMAN_MODEL, stage3_system, make_stage3_user(ranked_block),
+                client, CHAIRMAN_MODEL, stage3_system, make_stage3_user(ranked_block, redteam_block),
                 temperature=0.4,
             )
         yield sse(final_event, {"content": final})
@@ -644,7 +699,7 @@ async def _council_pipeline(
         yield sse("error", {"message": f"Chairman failed: {exc}"})
         return
 
-    yield sse("stage", {"stage": 3, "status": "done"})
+    yield sse("stage", {"stage": final_stage, "status": "done"})
     yield sse("done", {})
 
 
@@ -667,11 +722,19 @@ async def discover(req: DiscoverRequest):
             DISCOVER_STAGE1_SYSTEM,
             DISCOVER_STAGE1_USER_TEMPLATE.format(constraints=constraints),
             DISCOVER_STAGE2_SYSTEM,
-            lambda block: DISCOVER_STAGE2_USER_TEMPLATE.format(constraints=constraints, proposals=block),
+            lambda block, rt: DISCOVER_STAGE2_USER_TEMPLATE.format(
+                constraints=constraints, proposals=block, redteam=rt
+            ),
             DISCOVER_STAGE3_SYSTEM,
-            lambda ranked: DISCOVER_STAGE3_USER_TEMPLATE.format(constraints=constraints, proposals_with_ranks=ranked),
+            lambda ranked, rt: DISCOVER_STAGE3_USER_TEMPLATE.format(
+                constraints=constraints, proposals_with_ranks=ranked, redteam=rt
+            ),
             "ideas",
             stage1_temperature=0.8,
+            redteam_system=DISCOVER_REDTEAM_SYSTEM,
+            make_redteam_user=lambda block: DISCOVER_REDTEAM_USER_TEMPLATE.format(
+                constraints=constraints, proposals=block
+            ),
         ):
             yield ev
 
@@ -701,9 +764,9 @@ async def audit(req: AuditRequest):
             AUDIT_STAGE1_SYSTEM,
             AUDIT_STAGE1_USER_TEMPLATE.format(requirements=requirements, context=context),
             AUDIT_STAGE2_SYSTEM,
-            lambda block: AUDIT_STAGE2_USER_TEMPLATE.format(requirements=requirements, audits=block),
+            lambda block, _rt: AUDIT_STAGE2_USER_TEMPLATE.format(requirements=requirements, audits=block),
             AUDIT_STAGE3_SYSTEM,
-            lambda ranked: AUDIT_STAGE3_USER_TEMPLATE.format(
+            lambda ranked, _rt: AUDIT_STAGE3_USER_TEMPLATE.format(
                 requirements=requirements, context=context, audits_with_ranks=ranked
             ),
             "audit",

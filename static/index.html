@@ -275,6 +275,7 @@
   /* Discover — idea cards */
   #ideas-section { display: none; margin-bottom: 1.5rem; }
   #discover-analyses-section { display: none; margin-bottom: 1.5rem; }
+  #discover-redteam-section { display: none; margin-bottom: 1.5rem; }
   .idea-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -295,6 +296,28 @@
     margin-bottom: .1rem;
   }
   .idea-card .field.signal .field-label { color: var(--go); }
+  .idea-card .field.risk .field-label { color: var(--kill); }
+  .idea-card .field.fix .field-label { color: var(--cgo); }
+  .idea-card .field.risk {
+    background: rgba(239, 68, 68, .07);
+    border-left: 2px solid var(--kill);
+    padding: .4rem .6rem;
+    border-radius: .25rem;
+  }
+  .idea-card .odds {
+    display: inline-block;
+    margin-top: .4rem;
+    padding: .15rem .5rem;
+    border-radius: .25rem;
+    font-size: .7rem;
+    font-weight: 700;
+    letter-spacing: .04em;
+    border: 1px solid;
+  }
+  .idea-card .odds.LOW    { color: var(--kill);  border-color: var(--kill); }
+  .idea-card .odds.MEDIUM { color: var(--pivot); border-color: var(--pivot); }
+  .idea-card .odds.HIGH   { color: var(--go);    border-color: var(--go); }
+  .idea-card .odds-note { font-size: .8rem; color: var(--muted); margin-left: .4rem; }
 
   /* Audit — consolidated report (mirrors the verdict stamp) */
   #audit-stamp {
@@ -413,14 +436,18 @@
     <div class="timeline" id="discover-timeline" aria-live="polite">
       <div class="stage-chip" id="dchip1">
         <div class="stage-label">Stage 1</div>
-        Idea generation
+        Ideas + self-critique
       </div>
       <div class="stage-chip" id="dchip2">
         <div class="stage-label">Stage 2</div>
-        Anonymous peer review
+        Red-team deep dive
       </div>
       <div class="stage-chip" id="dchip3">
         <div class="stage-label">Stage 3</div>
+        Anonymous peer review
+      </div>
+      <div class="stage-chip" id="dchip4">
+        <div class="stage-label">Stage 4</div>
         Chairman's top 3
       </div>
     </div>
@@ -434,6 +461,12 @@
       <div class="section-title">Council proposals (before synthesis)</div>
       <div class="tabs" id="dtabs" role="tablist"></div>
       <div id="dcards"></div>
+    </div>
+
+    <div id="discover-redteam-section">
+      <div class="section-title">Red-team findings (the council attacking its own ideas)</div>
+      <div class="tabs" id="rtabs" role="tablist"></div>
+      <div id="rcards"></div>
     </div>
 
     <div id="discover-chat-section">
@@ -893,6 +926,7 @@ async function sendDiscoverChat() {
     payload: {
       constraints: discoverState.constraints,
       ideas: discoverState.ideasRaw,
+      redteam: redteamText(),
       proposals,
       history: discoverState.chatHistory,
       question,
@@ -917,9 +951,17 @@ function switchMode(mode) {
 // ── Discover mode (council in reverse) ───────────────────────────────────────
 
 const discoverState = {
-  models: [], letters: [], proposals: {},
+  models: [], letters: [], proposals: {}, redteam: {},
   constraints: '', ideasRaw: '', chatHistory: [],
 };
+
+// Red-team findings, flattened for the chat context (models stay anonymous).
+function redteamText() {
+  return Object.keys(discoverState.redteam).sort()
+    .filter(l => discoverState.redteam[l].content)
+    .map((l, i) => 'Red-team review ' + (i + 1) + ':\n' + discoverState.redteam[l].content)
+    .join('\n\n---\n\n');
+}
 
 function setDStage(n, status) {
   const chip = document.getElementById('dchip' + n);
@@ -962,6 +1004,52 @@ function dActivateTab(letter) {
   if (card) card.classList.add('active');
 }
 
+function rUpsertTab(letter) {
+  const tabs = document.getElementById('rtabs');
+  if (document.getElementById('rtab-' + letter)) return;
+  const tab = document.createElement('button');
+  tab.id = 'rtab-' + letter;
+  tab.className = 'tab';
+  tab.role = 'tab';
+  tab.onclick = () => rActivateTab(letter);
+  tab.textContent = 'Red-team ' + letter + ' …';
+  tabs.appendChild(tab);
+
+  const card = document.createElement('div');
+  card.id = 'rcard-' + letter;
+  card.className = 'card';
+  card.innerHTML = '<span class="spinner"></span> Attacking<span class="loading-dot"></span>';
+  document.getElementById('rcards').appendChild(card);
+
+  document.getElementById('discover-redteam-section').style.display = 'block';
+  if (!document.querySelector('#rtabs .tab.active')) rActivateTab(letter);
+}
+
+function rActivateTab(letter) {
+  document.querySelectorAll('#rtabs .tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('#rcards .card').forEach(c => c.classList.remove('active'));
+  const tab = document.getElementById('rtab-' + letter);
+  const card = document.getElementById('rcard-' + letter);
+  if (tab) tab.classList.add('active');
+  if (card) card.classList.add('active');
+}
+
+function updateRedteam(letter, model, content, error) {
+  discoverState.redteam[letter] = { model, content, error };
+  const tab = document.getElementById('rtab-' + letter);
+  const card = document.getElementById('rcard-' + letter);
+  if (!tab || !card) return;
+  const shortModel = (model || '').split('/').pop();
+  if (error) {
+    tab.textContent = 'Red-team ' + letter + ' ✗';
+    tab.classList.add('error');
+    card.innerHTML = '<p style="color:var(--kill)">Error: ' + escHtml(error) + '</p>';
+  } else {
+    tab.textContent = 'Red-team ' + letter + ' — ' + shortModel;
+    card.innerHTML = '<div class="analysis-text">' + escHtml(content) + '</div>';
+  }
+}
+
 function updateProposal(letter, model, content, error) {
   discoverState.proposals[letter] = { model, content, error };
   const tab = document.getElementById('dtab-' + letter);
@@ -983,25 +1071,39 @@ function buildIdeaCard(block) {
   card.className = 'idea-card';
   const titleM = block.match(/^IDEA\s*\d+\s*[:\-]\s*(.+)/i);
   const title = titleM ? titleM[1].trim() : 'Idea';
-  const stop = '(?=\\n[A-Z][A-Z &]+[:\\-]|$)';
+  // Stop at the next ALL-CAPS heading (labels may contain spaces, slashes, hyphens).
+  const stop = "(?=\\n[A-Z][A-Z &/'()-]*[:\\-]|$)";
   const fields = [
-    ['Payment signal', 'PAYMENT SIGNAL', true],
-    ['Why now', 'WHY NOW', false],
-    ['Riskiest assumption', 'RISKIEST ASSUMPTION', false],
-    ['Cheapest test', 'CHEAPEST TEST', false],
+    ['Payment signal', 'PAYMENT SIGNAL', 'signal'],
+    ['Why now', 'WHY NOW', ''],
+    ['Why this might fail', 'WHY THIS MIGHT FAIL', 'risk'],
+    ['How to de-risk it', 'HOW TO DE-RISK IT', 'fix'],
+    ['Riskiest assumption', 'RISKIEST ASSUMPTION', ''],
+    ['Cheapest test', 'CHEAPEST TEST', ''],
   ];
   let html = '<h3>' + escHtml(title) + '</h3>';
   let any = false;
-  fields.forEach(([label, key, isSignal]) => {
+  fields.forEach(([label, key, cls]) => {
     const re = new RegExp(key + '\\s*[:\\-]\\s*([\\s\\S]*?)' + stop, 'i');
     const m = block.match(re);
     if (m && m[1].trim()) {
       any = true;
-      html += '<div class="field' + (isSignal ? ' signal' : '') + '">' +
+      html += '<div class="field' + (cls ? ' ' + cls : '') + '">' +
               '<span class="field-label">' + label + '</span>' +
               escHtml(m[1].trim()) + '</div>';
     }
   });
+
+  const odds = block.match(new RegExp(
+    "SURVIVAL ODDS\\s*[:\\-]\\s*(LOW|MEDIUM|HIGH)\\s*(?:[—\\-–]\\s*)?([\\s\\S]*?)" + stop, 'i'));
+  if (odds) {
+    any = true;
+    const level = odds[1].toUpperCase();
+    const note = (odds[2] || '').trim();
+    html += '<div><span class="odds ' + level + '">SURVIVAL ODDS: ' + level + '</span>' +
+            (note ? '<span class="odds-note">' + escHtml(note) + '</span>' : '') + '</div>';
+  }
+
   if (!any) {
     const rest = block.replace(/^IDEA\s*\d+\s*[:\-]\s*.+/i, '').trim();
     html += '<div class="field">' + escHtml(rest) + '</div>';
@@ -1049,6 +1151,10 @@ function handleDEvent(ev) {
       dUpsertTab(ev.letter);
       updateProposal(ev.letter, ev.model, ev.content, ev.error);
       break;
+    case 'redteam_result':
+      rUpsertTab(ev.letter);
+      updateRedteam(ev.letter, ev.model, ev.content, ev.error);
+      break;
     case 'rankings':
       break;  // ranking is internal here; the top-3 is the deliverable
     case 'ideas':
@@ -1076,11 +1182,14 @@ async function runDiscover() {
   document.getElementById('idea-cards').innerHTML = '';
   document.getElementById('dtabs').innerHTML = '';
   document.getElementById('dcards').innerHTML = '';
+  document.getElementById('discover-redteam-section').style.display = 'none';
+  document.getElementById('rtabs').innerHTML = '';
+  document.getElementById('rcards').innerHTML = '';
   document.getElementById('discover-chat-section').style.display = 'none';
   document.getElementById('discover-chat-messages').innerHTML = '';
-  [1, 2, 3].forEach(n => setDStage(n, ''));
+  [1, 2, 3, 4].forEach(n => setDStage(n, ''));
   Object.assign(discoverState, {
-    models: [], letters: [], proposals: {},
+    models: [], letters: [], proposals: {}, redteam: {},
     constraints, ideasRaw: '', chatHistory: [],
   });
 

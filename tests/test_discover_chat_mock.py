@@ -84,6 +84,50 @@ async def test_discover_chat_mock():
 
 
 @pytest.mark.asyncio
+async def test_discover_chat_passes_redteam_context():
+    """Red-team findings reach both the council members and the chairman."""
+    os.environ["OPENROUTER_API_KEY"] = "test-key"
+    os.environ["COUNCIL_MODELS"] = "model-a,model-b"
+    os.environ["CHAIRMAN_MODEL"] = "model-chairman"
+
+    import importlib
+    import app as app_module
+    importlib.reload(app_module)
+
+    seen = []
+
+    async def mock_call_model(client, model, system, user, temperature=0.7):
+        seen.append((system, user))
+        if "chairman" in model:
+            return MOCK_SYNTHESIS
+        if "peer reviewer" in system.lower():
+            return MOCK_REVIEW
+        return MOCK_MEMBER_ANSWER
+
+    req = app_module.DiscoverChatRequest(
+        constraints="UA market, B2B",
+        ideas="IDEA 2: Reactivation-as-a-service for dental clinics.",
+        redteam="Red-team review 1:\nFATAL FLAWS: patient data access is a legal barrier.",
+        proposals=[
+            app_module.ChatAnalysis(letter="A", model="model-a", content="proposal set A"),
+            app_module.ChatAnalysis(letter="B", model="model-b", content="proposal set B"),
+        ],
+        history=[],
+        question="Is the data barrier really fatal?",
+    )
+
+    with patch.object(app_module, "call_model", side_effect=mock_call_model):
+        async for _ in (await app_module.discover_chat(req)).body_iterator:
+            pass
+
+    member_users = [u for s, u in seen if "idea-generation council" in s.lower()]
+    chairman_users = [u for s, u in seen if "chairman" in s.lower()]
+    assert member_users, "No council member calls recorded"
+    assert all("FATAL FLAWS" in u for u in member_users), "Members did not see red-team findings"
+    assert all("FATAL FLAWS" in u for u in chairman_users), "Chairman did not see red-team findings"
+
+
+@pytest.mark.asyncio
 async def test_discover_chat_requires_context():
     os.environ["OPENROUTER_API_KEY"] = "test-key"
 

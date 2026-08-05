@@ -63,22 +63,39 @@ your idea, it proposes the **top 3 ideas with a real signal of willingness to
 pay** — problems people or companies already spend money on (competitors,
 agencies, manual workarounds, lost revenue), not hype.
 
-- **Stage 1** — each model proposes 3 ideas, each requiring a named payer and
-  concrete evidence of existing spend.
-- **Stage 2** — anonymous peer review ranks the idea sets by strength of payment
-  signal.
-- **Stage 3** — the chairman picks and sharpens the top 3 overall, each with:
-  payer & payment signal, why now, riskiest assumption, and the cheapest test.
+Discover is deliberately **self-critical** — the council attacks its own ideas
+before showing them to you, so it runs one extra stage (and costs more) than the
+other modes:
+
+- **Stage 1 — ideas + self-critique.** Each model proposes 3 ideas, each requiring
+  a named payer and concrete evidence of existing spend, and must argue *why the
+  idea probably does not work* (`WHY THIS MIGHT FAIL`, `MOST LIKELY FAILURE MODE`)
+  before offering a fix — including "NO CREDIBLE FIX" when that is the honest answer.
+- **Stage 2 — red-team deep dive.** Every model then attacks the *pooled, anonymous*
+  ideas with one job: kill them. It audits whether the payment signal is real or
+  assumed, who literally signs the cheque, what the incumbent does in response,
+  distribution cost, hidden killers (regulation, liability, data access, churn),
+  and whether the "cheapest test" is a disguised survey. Each idea gets a verdict:
+  SURVIVES / WOUNDED / DEAD, plus what would save it.
+- **Stage 3 — anonymous peer review.** Ranks the idea sets by payment signal *and*
+  how well they survived the attack, rewarding proposers who named the real
+  weakness themselves and penalizing token self-criticism.
+- **Stage 4 — chairman's top 3.** Picks the ideas that best survived, and must
+  carry the strongest surviving objection into each one: payer & payment signal,
+  why now, **why this might fail**, **how to de-risk it**, riskiest assumption,
+  cheapest test, and **survival odds** (LOW / MEDIUM / HIGH).
 
 Give optional constraints (market, B2B/B2C, your skills, a domain) or leave it
-empty to scan broadly. Calls per run: `(council size × 2) + 1`. Expand
-*Council proposals* to see each model's raw ideas before synthesis.
+empty to scan broadly. Calls per run: `(council size × 3) + 1` — one pass more than
+the other modes, by design. Expand *Council proposals* and *Red-team findings* to
+see the raw ideas and the attacks on them before synthesis.
 
 Like the validate tab, Discover has a **follow-up chat**: after the top 3 are
 shown you can ask the council to go deeper on an idea or weigh a variation, and
 the same answer → peer review → chairman synthesis runs again — staying anti-hype
-and tracing every recommendation back to who pays. Calls per follow-up:
-`(council size × 2) + 1`.
+and tracing every recommendation back to who pays. The chat is handed the
+red-team findings too, so an objection stands until you actually answer it.
+Calls per follow-up: `(council size × 2) + 1`.
 
 ## Audit mode (pre-contract requirements risk auditor)
 
